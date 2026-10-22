@@ -158,6 +158,8 @@
           return coxSurvival(m.calibrator, [rnLogit(z)]);
         case 'two':
           return twoStage(z).curve;
+        case 'bal':
+          return balanced(z).curve;
         default:
           throw new Error('Unknown model: ' + name);
       }
@@ -166,11 +168,25 @@
     // Прогноз min(T, τ) — как point_prediction() в scripts/survival_time_predictor.py.
     // time — медиана: первый день, когда S(t) ≤ 0,5, или τ (оценка с наименьшей средней абсолютной ошибкой);
     // confidence — вероятность по самой модели, что |min(T, τ) − time| ≤ tolerance;
+    // Двухэтапная модель для популяции balanced_dataset.csv — как balanced_mixture() в scripts/survival_time_predictor.py:
+    // логистическая регрессия «смерть от ССЗ до τ»; прогноз death_time при вероятности ≥ threshold, иначе τ;
+    // S(t) = 1 − p·F(t), F — доля умерших к дню t среди умерших от ССЗ до τ в обучающей выборке
+    const bal = models.bal;
+    const deathCdf = new Float64Array(tau);
+    for (let t = 0; t < tau; t++) deathCdf[t] = bal.death_days.filter((day) => day <= t).length / bal.death_days.length;
+    function balanced(z) {
+      let s = bal.intercept;
+      for (let k = 0; k < d; k++) s += bal.coef[k] * z[k];
+      const p = sigmoid(s);
+      const curve = Float64Array.from(deathCdf, (F) => 1 - p * F);
+      return { curve, time: p >= bal.threshold ? bal.death_time : tau, stage: { kind: 'balanced', p, threshold: bal.threshold, tau } };
+    }
+
     // rmst — ожидаемое число дней без смерти от ССЗ в пределах τ; sTau = S(τ); risk1y — риск смерти от ССЗ за год;
     // stage — у двухэтапного алгоритма: группа этапа 1 и оценка классификатора
     const tolerance = bundle.meta.tolerance;
     function predict(xRaw, name) {
-      const two = name === 'two' ? twoStage(scale(xRaw)) : null;
+      const two = name === 'two' ? twoStage(scale(xRaw)) : name === 'bal' ? balanced(scale(xRaw)) : null;
       const curve = two ? two.curve : survival(xRaw, name);
       const n = curve.length;
       let rmst = 0, median = n;

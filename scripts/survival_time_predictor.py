@@ -60,6 +60,7 @@ MODEL_NAMES = {
     'nn': 'NN Survival',
     'rn': 'RN Survival',
     'two': 'Cascade',
+    'bal': 'Balanced two-stage',
 }
 # Модели ноутбука с калибровкой S(t); 'two' — каскад классификаторов и моделей времени (train_cascade)
 SURVIVAL_MODELS = ['cph', 'aft', 'xgb', 'nn', 'rn']
@@ -83,6 +84,17 @@ STAGE1_SHARE = 0.02   # доля пациентов, относимых к гр�
 EARLY_TIME = 150      # прогноз для неё: окно ±150 дней покрывает смерти с 0-го по 300-й день
 MID_SHARE = 0.01      # доля пациентов, относимых к группе смерти между EARLY_DAYS и τ
 MID_TIME = 900
+
+# Двухэтапная модель для популяции balanced_dataset.csv — пациентов, у которых исход к τ известен (умерли от ССЗ
+# или наблюдались не меньше τ; смертей от ССЗ 37% вместо 10% во всей когорте). Остальные модели откалиброваны
+# на всю когорту и для этой популяции занижают риск: у 74 из 151 смерти от ССЗ до τ ошибка была больше 1000 дней.
+# Обучается на 326 обучающих пациентах df_balanced: логистическая регрессия «смерть от ССЗ до τ»; при вероятности
+# ≥ BALANCED_THRESHOLD прогноз — BALANCED_DEATH_TIME, иначе τ. Настройки выбраны кросс-валидацией на тех же
+# 326 пациентах из вариантов: логистическая регрессия или XGBoost, порог 0,3–0,6, прогноз для умерших 100–200
+# дней или классификатор «ранняя/поздняя смерть»; классификация окон времени по 300 дней; модель Кокса;
+# промежуточная зона с прогнозом модели Кокса. Применять — только к пациентам этой популяции.
+BALANCED_THRESHOLD = 0.6
+BALANCED_DEATH_TIME = 150
 # Признаки, известные только после выписки: в моделях не используются (см. docstring)
 POST_DISCHARGE = ('doctor', 'llo')
 # Роль пациента в обучении (patients.split в docs/survival_model.js)
@@ -331,6 +343,30 @@ def library_cascade(cascade, X_sc, features):
 
 
 # ---------------------------------------------------------------------------
+# Двухэтапная модель для популяции balanced_dataset.csv
+# ---------------------------------------------------------------------------
+def train_balanced(df, features, train_idx, scaler):
+    """Логистическая регрессия «смерть от ССЗ до τ» на обучающих пациентах df_balanced (см. BALANCED_THRESHOLD)."""
+    from sklearn.linear_model import LogisticRegression
+    time = df.loc[train_idx, 'time'].values.astype(float)
+    death = df.loc[train_idx, 'target'].values.astype(bool) & (time < TAU)
+    classifier = LogisticRegression(C=0.3, max_iter=5000).fit(scaler.transform(df.loc[train_idx, features]), death)
+    return dict(classifier=classifier, death_days=np.sort(time[death]).astype(int))
+
+
+def balanced_mixture(p_death, death_days):
+    """Время: BALANCED_DEATH_TIME при вероятности смерти до τ ≥ BALANCED_THRESHOLD, иначе τ.
+    S(t) = 1 − p · F(t), где F — доля умерших к дню t среди умерших от ССЗ до τ в обучающей выборке."""
+    F = (np.asarray(death_days)[None, :] <= GRID[:, None]).mean(axis=1)
+    S = 1 - p_death[:, None] * F[None, :]
+    return S, np.where(p_death >= BALANCED_THRESHOLD, BALANCED_DEATH_TIME, TAU)
+
+
+def library_balanced(bm, X_sc):
+    return balanced_mixture(bm['classifier'].predict_proba(X_sc)[:, 1], bm['death_days'])
+
+
+# ---------------------------------------------------------------------------
 # Экспорт параметров: всё, что нужно для расчёта S(t) без библиотек (numpy или JavaScript)
 # ---------------------------------------------------------------------------
 def _f32_b64(a):
@@ -379,7 +415,7 @@ def _xgb_leaf_sum(trees, X_sc):
     return out
 
 
-def export_params(df, features, train_idx, m, calibrators, ts):
+def export_params(df, features, train_idx, m, calibrators, ts, bm):
     X_train_sc = m['scaler'].transform(df.loc[train_idx, features])
     trees, base_margin = _export_xgb_trees(m['xgb_surv'], X_train_sc)
     nn_weights = m['nn_model'].get_weights()  # W1, b1, W2, b2, W3, b3
@@ -414,6 +450,9 @@ def export_params(df, features, train_idx, m, calibrators, ts):
                    'intercept': float(m['rn_readout'].intercept_[0]),
                    'calibrator': _export_cox(calibrators['rn'], ['score'])},
             'two': _export_cascade(ts, features),
+            'bal': {'type': 'balanced_two_stage', 'coef': _round(bm['classifier'].coef_[0], 10),
+                    'intercept': float(bm['classifier'].intercept_[0]), 'threshold': BALANCED_THRESHOLD,
+                    'death_time': BALANCED_DEATH_TIME, 'death_days': bm['death_days'].tolist()},
         },
     }
 
@@ -490,6 +529,11 @@ class SurvivalTimePredictor:
         """Стандартизация признаков моделей; X_raw — все признаки пациента в порядке self.features."""
         return (np.atleast_2d(np.asarray(X_raw, dtype=float))[:, self._columns] - self.mean) / self.scale
 
+    def _balanced(self, X_sc):
+        m = self.models['bal']
+        p = 1 / (1 + np.exp(-(X_sc @ np.array(m['coef']) + m['intercept'])))
+        return balanced_mixture(p, m['death_days'])
+
     def _two_stage(self, X_sc):
         m = self.models['two']
         s1, s2 = m['stage1'], m['stage2']
@@ -507,6 +551,8 @@ class SurvivalTimePredictor:
         m = self.models[name]
         if name == 'two':
             return self._two_stage(X_sc)[0]
+        if name == 'bal':
+            return self._balanced(X_sc)[0]
         if name == 'cph':
             return self._cox(m, X_sc)
         if name == 'aft':
@@ -515,9 +561,9 @@ class SurvivalTimePredictor:
         return self._cox(m['calibrator'], self.risk_score(X_sc, name))
 
     def predict(self, X_raw, name):
-        if name == 'two':
+        if name in ('two', 'bal'):
             X_sc = self._scale(X_raw)
-            return point_prediction(*self._two_stage(X_sc))
+            return point_prediction(*(self._two_stage(X_sc) if name == 'two' else self._balanced(X_sc)))
         return point_prediction(self.survival(X_raw, name))
 
 
@@ -548,21 +594,22 @@ def point_prediction(S, time=None):
 # ---------------------------------------------------------------------------
 # Метрики на отложенной выборке с учётом цензурирования
 # ---------------------------------------------------------------------------
-def test_metrics(curves, time_obs, event_obs, time_train, event_train, times=None):
+def test_metrics(curves, time_obs, event_obs, time_train, event_train, times=None, ipcw=True):
     """C-index; Brier score прогноза S(τ) с весами IPCW (обратная вероятность не быть цензурированным —
     так в оценку корректно входят пациенты, цензурированные до τ); ошибка калибровки RMST — среднее
     |прогноз − RMST Каплана — Мейера| по квинтилям прогноза. Для прогноза времени (медианы) — у пациентов
     с известным min(T, τ), с весами IPCW: средняя абсолютная ошибка, доля прогнозов с ошибкой ≤ TOLERANCE,
     а также доля пациентов с уверенностью ≥ CONFIDENT и фактическая доля ошибок ≤ TOLERANCE среди них.
-    times — прогноз времени моделей, которые выбирают его не медианой S(t) (двухэтапный алгоритм)."""
+    times — прогноз времени моделей, которые выбирают его не медианой S(t) (каскад, двухэтапная модель).
+    ipcw=False — для balanced_dataset.csv: исход к τ известен у всех, и пациенты входят с равными весами."""
     from lifelines import KaplanMeierFitter
     from lifelines.utils import concordance_index, restricted_mean_survival_time
     km_censoring = KaplanMeierFitter().fit(time_train, 1 - event_train)
     G = lambda t: np.maximum(km_censoring.survival_function_at_times(t).values, 1e-3)
     died = event_obs & (time_obs < TAU)
     weights = np.zeros(len(time_obs))
-    weights[died] = 1 / G(time_obs[died] - 1)
-    weights[time_obs >= TAU] = 1 / G(TAU)
+    weights[died] = 1 / G(time_obs[died] - 1) if ipcw else 1
+    weights[time_obs >= TAU] = 1 / G(TAU) if ipcw else 1
     known = weights > 0
     true_tau = np.minimum(time_obs, TAU)
 
@@ -583,6 +630,7 @@ def test_metrics(curves, time_obs, event_obs, time_train, event_train, times=Non
             'mae_rmst': weighted(np.abs(rmst - true_tau), known),
             'mae': weighted(error, known),
             'within_tolerance': weighted(error <= TOLERANCE, known),
+            'errors_over_1000': weighted(error > 1000, known),
             'confident_share': float(np.mean(p['confidence'] >= CONFIDENT)),
             'confident_within_tolerance': weighted(error <= TOLERANCE, confident),
             'mean_s_tau': float(S[:, -1].mean()),
@@ -606,18 +654,29 @@ def cmd_export(args):
     train_all = bal_train.append(cal_train)
     print(f'Каскад: классификаторы смерти от ССЗ ≤ {EARLY_DAYS} дн. и {EARLY_DAYS}–{TAU} дн., модель Кокса...')
     ts = train_cascade(full, mf, train_all, m['scaler'])
+    print('Двухэтапная модель для популяции balanced_dataset.csv...')
+    bm = train_balanced(df, mf, bal_train, m['scaler'])
 
     # Эталонный прогноз библиотек — для всех пациентов полного датасета
     X_all_sc = m['scaler'].transform(full[mf])
     reference = library_survival(m, calibrators, X_all_sc, mf)
     reference['two'], two_time = library_cascade(ts, X_all_sc, mf)
-    reference_pred = {k: point_prediction(S, two_time if k == 'two' else None) for k, S in reference.items()}
-    test_pos = full.index.get_indexer(test_idx)
-    metrics = test_metrics({k: S[test_pos] for k, S in reference.items()},
-                           full.loc[test_idx, 'time'].values.astype(float), full.loc[test_idx, 'target'].values.astype(bool),
-                           full.loc[train_all, 'time'].values.astype(float), full.loc[train_all, 'target'].values,
-                           times={'two': two_time[test_pos]})
-    km_s_tau = metrics.pop('_km_s_tau')
+    reference['bal'], bal_time = library_balanced(bm, X_all_sc)
+    times = {'two': two_time, 'bal': bal_time}
+    reference_pred = {k: point_prediction(S, times.get(k)) for k, S in reference.items()}
+
+    # Метрики — для каждой популяции на её отложенных пациентах: вся когорта (302, веса IPCW)
+    # и balanced_dataset.csv (82 отложенных пациента df_balanced, исход известен у всех)
+    def metrics_on(idx, ipcw):
+        pos = full.index.get_indexer(idx)
+        return test_metrics({k: S[pos] for k, S in reference.items()},
+                            full.loc[idx, 'time'].values.astype(float), full.loc[idx, 'target'].values.astype(bool),
+                            full.loc[train_all, 'time'].values.astype(float), full.loc[train_all, 'target'].values,
+                            times={k: t[pos] for k, t in times.items()}, ipcw=ipcw)
+    bal_test = df.index.intersection(test_idx)
+    metrics = {'full': metrics_on(test_idx, True), 'balanced': metrics_on(bal_test, False)}
+    km_s_tau = metrics['full'].pop('_km_s_tau')
+    metrics['balanced'].pop('_km_s_tau')
     cohort_km = KaplanMeierFitter().fit(full['time'], full['target'])
 
     # Пациенты — весь med_dataset_cardio.xlsx; balanced_dataset.csv — подмножество его строк
@@ -630,7 +689,7 @@ def cmd_export(args):
                  # Каплан — Мейер по всей когорте: средний риск — для сравнения с прогнозом пациента
                  'cohort_risk_1y': float(1 - cohort_km.survival_function_at_times(365).iloc[0]),
                  'cohort_s_tau': float(cohort_km.survival_function_at_times(TAU - 1).iloc[0]),
-                 'test_size': len(test_idx), 'test_km_s_tau': km_s_tau},
+                 'test_size': {'full': len(test_idx), 'balanced': len(bal_test)}, 'test_km_s_tau': km_s_tau},
         'features': features,
         'model_features': mf,  # признаки моделей — без известных только после выписки
         'columns': full.columns.tolist(),  # порядок столбцов датасетов — для выгрузки изменённого датасета
@@ -646,7 +705,7 @@ def cmd_export(args):
             'balanced': {'file': BALANCED_CSV.name, 'rows': full.index.get_indexer(df.index).tolist()},
             'full': {'file': FULL_XLSX.name, 'rows': None},
         },
-        **export_params(df, mf, bal_train, m, calibrators, ts),
+        **export_params(df, mf, bal_train, m, calibrators, ts, bm),
         'metrics': metrics,
         # Прогноз по самим библиотекам — эталон для проверки JavaScript-расчёта (scripts/check_js_predictor.js)
         'reference_rmst': {k: _round(S.sum(axis=1), 9) for k, S in reference.items()},
@@ -656,16 +715,18 @@ def cmd_export(args):
 
     # Проверка: расчёт по экспортированным параметрам совпадает с библиотеками
     predictor = SurvivalTimePredictor(json.loads(json.dumps(bundle)))
-    print(f'Отложенная выборка: {len(test_idx)} пациентов, S(τ) по Каплану — Мейеру {km_s_tau:.3f}')
-    print(f'{"модель":<12} {"C-index":>8} {"Brier":>6} {"калибр.":>8} {"MAE":>7} {"MAE RMST":>9} '
-          f'{f"≤{TOLERANCE} дн":>8} {f"P≥{CONFIDENT}":>7} {"из них ≤":>9} {"ср. S(τ)":>9} {"max |ΔRMST|":>12}')
-    for name in MODEL_NAMES:
-        diff = np.abs(predictor.predict(full[features].values, name)['rmst'] - reference[name].sum(axis=1)).max()
-        r = metrics[name]
-        print(f'{MODEL_NAMES[name]:<12} {r["c_index"]:>8.4f} {r["brier_s_tau"]:>6.3f} {r["calibration_rmst"]:>5.0f} дн '
-              f'{r["mae"]:>4.0f} дн {r["mae_rmst"]:>6.0f} дн {r["within_tolerance"]:>8.1%} {r["confident_share"]:>7.0%} '
-              f'{r["confident_within_tolerance"]:>9.1%} {r["mean_s_tau"]:>9.3f} {diff:>12.2e}')
-        assert diff < 0.05, f'{name}: расчёт по параметрам расходится с библиотекой'
+    for population, title in [('full', f'вся когорта: {len(test_idx)} отложенных, веса IPCW, S(τ) по Каплану — Мейеру {km_s_tau:.3f}'),
+                              ('balanced', f'balanced_dataset.csv: {len(bal_test)} отложенных, исход известен у всех')]:
+        print(f'\nОтложенная выборка — {title}')
+        print(f'{"модель":<19} {"C-index":>8} {"Brier":>6} {"MAE":>7} {f"≤{TOLERANCE} дн":>8} {">1000 дн":>9} '
+              f'{f"P≥{CONFIDENT}":>7} {"из них ≤":>9} {"ср. S(τ)":>9} {"max |ΔRMST|":>12}')
+        for name in MODEL_NAMES:
+            diff = np.abs(predictor.predict(full[features].values, name)['rmst'] - reference[name].sum(axis=1)).max()
+            r = metrics[population][name]
+            print(f'{MODEL_NAMES[name]:<19} {r["c_index"]:>8.4f} {r["brier_s_tau"]:>6.3f} {r["mae"]:>4.0f} дн '
+                  f'{r["within_tolerance"]:>8.1%} {r["errors_over_1000"]:>9.1%} {r["confident_share"]:>7.0%} '
+                  f'{r["confident_within_tolerance"]:>9.1%} {r["mean_s_tau"]:>9.3f} {diff:>12.2e}')
+            assert diff < 0.05, f'{name}: расчёт по параметрам расходится с библиотекой'
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

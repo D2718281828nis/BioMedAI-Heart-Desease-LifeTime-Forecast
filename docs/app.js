@@ -18,7 +18,10 @@
   const TAU = BUNDLE.meta.tau;
   const MODELS = BUNDLE.meta.model_names;
   const MODEL_KEYS = Object.keys(MODELS);
-  const DEFAULT_MODEL = 'two'; // каскад: наименьшая ошибка прогноза времени при кросс-валидации и на отложенной выборке
+  // Модель по умолчанию — своя для каждой популяции: для balanced_dataset.csv (исход к τ известен у всех) —
+  // двухэтапная модель, обученная на этой популяции; для всей когорты — каскад, откалиброванный на всю когорту.
+  // Метрики в таблице моделей тоже считаются на отложенных пациентах выбранного датасета
+  const DEFAULT_MODELS = { balanced: 'bal', full: 'two' };
   // Признаки, которые модели не используют (известны только после выписки)
   const MODEL_FEATURES = new Set(BUNDLE.model_features || BUNDLE.features);
   const DEFAULT_DATASET = 'balanced';
@@ -133,7 +136,8 @@
   const state = {
     dataset: DATASETS[saved.dataset] ? saved.dataset : DEFAULT_DATASET,
     perplexity: Number.isFinite(saved.perplexity) ? clamp(Math.round(saved.perplexity), 2, 100) : 30,
-    model: MODELS[saved.model] ? saved.model : DEFAULT_MODEL,
+    // Выбранная модель запоминается для каждого датасета отдельно
+    models: Object.fromEntries(Object.entries(DEFAULT_MODELS).map(([key, m]) => [key, MODELS[saved.models?.[key]] ? saved.models[key] : m])),
     selected: indexById.has(saved.selectedId) ? indexById.get(saved.selectedId) : -1,
     hovered: -1,
     theme: saved.theme,
@@ -155,6 +159,7 @@
     return false;
   }
   const editedFeatures = (g) => FEATURES.filter((_, k) => state.values[g][k] !== PATIENTS.X[g][k]);
+  state.model = state.models[state.dataset];
   const editedSet = new Set();
 
   let saveTimer = 0;
@@ -168,7 +173,7 @@
       }
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
-          dataset: state.dataset, perplexity: state.perplexity, model: state.model, selectedId: PATIENTS.id[state.selected],
+          dataset: state.dataset, perplexity: state.perplexity, models: state.models, selectedId: PATIENTS.id[state.selected],
           theme: state.theme, lang: I18N.lang, editsById,
         }));
       } catch (e) { /* хранилище недоступно — состояние живёт только до перезагрузки */ }
@@ -566,12 +571,16 @@
       fact(t('fact.alive'), I18N.fixed(cur.sTau, 2),
         datasetOr((v) => I18N.fixed(v, 2), base.sTau, t('fact.aliveNote', { tau: fmtDays(TAU) }))),
       // Каскад: в какую группу классификаторы отнесли пациента
-      cur.stage ? fact(t('fact.stage'), t(`fact.stage.${cur.stage.group}`, { days: fmtDays(cur.stage.days), tau: fmtDays(cur.stage.tau) }),
+      cur.stage && cur.stage.kind !== 'balanced' ? fact(t('fact.stage'), t(`fact.stage.${cur.stage.group}`, { days: fmtDays(cur.stage.days), tau: fmtDays(cur.stage.tau) }),
         t('fact.stageNote', {
           days: fmtDays(cur.stage.days), tau: fmtDays(cur.stage.tau),
           p1: fmtPct(cur.stage.pEarly), t1: fmtPct(cur.stage.thresholdEarly),
           p2: fmtPct(cur.stage.pMid), t2: fmtPct(cur.stage.thresholdMid),
         })) : null,
+      // Двухэтапная модель для balanced_dataset.csv: вероятность смерти от ССЗ до τ и порог
+      cur.stage && cur.stage.kind === 'balanced' ? fact(t('fact.balStage'),
+        t(cur.stage.p >= cur.stage.threshold ? 'fact.balDeath' : 'fact.balSurvive', { tau: fmtDays(cur.stage.tau) }),
+        t('fact.balNote', { p: fmtPct(cur.stage.p), thr: fmtPct(cur.stage.threshold), tau: fmtDays(cur.stage.tau) })) : null,
     ].filter(Boolean));
     // Если наблюдение закончилось до τ без смерти от ССЗ, min(T, τ) неизвестно — есть только нижняя граница
     const subKey = observed(g).exact ? 'hero.sub' : PATIENTS.death_any[g] ? 'hero.subOther' : 'hero.subCensored';
@@ -585,23 +594,26 @@
   function renderModelTable() {
     const g = state.selected;
     const edited = editedSet.has(g);
+    const metrics = BUNDLE.metrics[ds.key];
     $('model-table').tBodies[0].replaceChildren(...MODEL_KEYS.map((m) => {
       const radio = el('input', { type: 'radio', name: 'model-radio', value: m, checked: m === state.model });
       radio.addEventListener('change', () => setModel(m));
       const tr = el('tr', { class: m === state.model ? 'active' : '' },
         el('td', {}, el('label', {}, radio, MODELS[m])),
-        el('td', { text: I18N.fixed(BUNDLE.metrics[m].c_index, 3) }),
-        el('td', { text: fmtDays(BUNDLE.metrics[m].mae) }),
-        el('td', { text: fmtPct(BUNDLE.metrics[m].within_tolerance) }),
-        el('td', { text: I18N.fixed(BUNDLE.metrics[m].brier_s_tau, 3) }),
+        el('td', { text: I18N.fixed(metrics[m].c_index, 3) }),
+        el('td', { text: fmtDays(metrics[m].mae) }),
+        el('td', { text: fmtPct(metrics[m].within_tolerance) }),
+        el('td', { text: fmtPct(metrics[m].errors_over_1000) }),
+        el('td', { text: I18N.fixed(metrics[m].brier_s_tau, 3) }),
         el('td', { text: t('days.short', { n: fmtDays(baseTime[m][g]) }) }),
         el('td', { text: edited ? t('days.short', { n: fmtDays(curTime[m][g]) }) : '—' }));
       tr.addEventListener('click', (e) => { if (e.target !== radio) setModel(m); });
       return tr;
     }));
-    const r = BUNDLE.metrics[state.model];
-    $('models-note').textContent = t('models.note', {
-      tol: TOLERANCE, n: BUNDLE.meta.test_size, model: MODELS[state.model], within: fmtPct(r.within_tolerance),
+    const r = metrics[state.model];
+    $('models-note').textContent = t(ds.key === 'balanced' ? 'models.noteBalanced' : 'models.note', {
+      tol: TOLERANCE, n: BUNDLE.meta.test_size[ds.key], model: MODELS[state.model], within: fmtPct(r.within_tolerance),
+      over1000: fmtPct(r.errors_over_1000),
       p: fmtPct(CONFIDENT), share: fmtPct(r.confident_share), hit: fmtPct(r.confident_within_tolerance),
       maeRmst: fmtDays(r.mae_rmst), mae: fmtDays(r.mae),
     });
@@ -966,6 +978,7 @@
 
   function setModel(m) {
     state.model = m;
+    state.models[state.dataset] = m;
     $('model-select').value = m;
     for (const g of ds.rows) updateTableRow(g);
     sortTable();
@@ -990,6 +1003,8 @@
     state.dataset = key;
     ds = getView(key);
     $('dataset-select').value = key;
+    state.model = state.models[key];
+    $('model-select').value = state.model;
     if (ds.local[state.selected] < 0) state.selected = ds.rows[0];
     state.hovered = -1;
     hideTooltip();
