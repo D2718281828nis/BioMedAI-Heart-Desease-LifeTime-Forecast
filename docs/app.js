@@ -17,49 +17,44 @@
   const DEFAULT_MODEL = 'xgb';
   const STORAGE_KEY = 'survival-explorer:v1';
 
-  // Описание признаков — по med_dataset_cardio.md
-  const NO_YES = ['no', 'yes'];
+  // Группа признака в редакторе и шаг ползунка (у категориальных — 1);
+  // названия, единицы и значения категорий на двух языках — в i18n.js
   const FEATURE_INFO = {
-    age: { label: 'Age', unit: 'years', step: 1, group: 'demo' },
-    gender: { label: 'Sex', levels: ['female', 'male'], group: 'demo' },
-    bmi: { label: 'Body-mass index', unit: 'kg/m²', step: 0.1, group: 'demo' },
-    smoking: { label: 'Smoker', levels: NO_YES, group: 'demo' },
-    bpm: { label: 'Heart rate on admission', unit: 'bpm', step: 1, group: 'vitals' },
-    sysAP: { label: 'Systolic blood pressure', unit: 'mmHg', step: 1, group: 'vitals' },
-    ef_hosp: { label: 'LV ejection fraction', unit: '%', step: 0.1, group: 'vitals' },
-    pulm_cong: { label: 'Pulmonary congestion', levels: NO_YES, group: 'vitals' },
-    af: { label: 'Atrial fibrillation / flutter', levels: NO_YES, group: 'comorb' },
-    dm: { label: 'Diabetes mellitus', levels: NO_YES, group: 'comorb' },
-    ckd: { label: 'Chronic kidney disease ≥ 3a', levels: NO_YES, group: 'comorb' },
-    copd: { label: 'COPD', levels: NO_YES, group: 'comorb' },
-    insult: { label: 'Prior stroke', levels: NO_YES, group: 'comorb' },
-    onco: { label: 'Cancer', levels: NO_YES, group: 'comorb' },
-    severity: { label: 'Severity', levels: ['unstable angina', 'myocardial infarction'], group: 'event' },
-    stemi: { label: 'STEMI', levels: NO_YES, group: 'event' },
-    nstemi: { label: 'NSTEMI', levels: NO_YES, group: 'event' },
-    sum_cad: { label: 'Affected coronary arteries', unit: 'count', step: 1, group: 'event' },
-    ca_delay: { label: 'Angiography delayed > 24 h', levels: NO_YES, group: 'treat' },
-    stenting: { label: 'Stenting', levels: NO_YES, group: 'treat' },
-    total_revasc: { label: 'Total revascularization', levels: NO_YES, group: 'treat' },
-    llo: { label: 'Subsidized drugs after discharge', levels: NO_YES, group: 'treat' },
-    doctor: { label: 'Follow-up physician', levels: ['none', 'general practitioner', 'cardiologist'], group: 'treat' },
-    hb: { label: 'Hemoglobin', unit: 'g/L', step: 1, group: 'labs' },
-    leukoc: { label: 'Leukocytes', unit: '×10⁹/L', step: 0.1, group: 'labs' },
-    tromboc: { label: 'Platelets', unit: '×10⁹/L', step: 1, group: 'labs' },
-    t_chol: { label: 'Total cholesterol', unit: 'mmol/L', step: 0.1, group: 'labs' },
-    ldl: { label: 'LDL cholesterol', unit: 'mmol/L', step: 0.01, group: 'labs' },
-    glu: { label: 'Glucose', unit: 'mmol/L', step: 0.1, group: 'labs' },
-    crea: { label: 'Creatinine', unit: 'µmol/L', step: 1, group: 'labs' },
+    age: { step: 1, group: 'demo' },
+    gender: { group: 'demo' },
+    bmi: { step: 0.1, group: 'demo' },
+    smoking: { group: 'demo' },
+    bpm: { step: 1, group: 'vitals' },
+    sysAP: { step: 1, group: 'vitals' },
+    ef_hosp: { step: 0.1, group: 'vitals' },
+    pulm_cong: { group: 'vitals' },
+    af: { group: 'comorb' },
+    dm: { group: 'comorb' },
+    ckd: { group: 'comorb' },
+    copd: { group: 'comorb' },
+    insult: { group: 'comorb' },
+    onco: { group: 'comorb' },
+    severity: { group: 'event' },
+    stemi: { group: 'event' },
+    nstemi: { group: 'event' },
+    sum_cad: { step: 1, group: 'event' },
+    ca_delay: { group: 'treat' },
+    stenting: { group: 'treat' },
+    total_revasc: { group: 'treat' },
+    llo: { group: 'treat' },
+    doctor: { group: 'treat' },
+    hb: { step: 1, group: 'labs' },
+    leukoc: { step: 0.1, group: 'labs' },
+    tromboc: { step: 1, group: 'labs' },
+    t_chol: { step: 0.1, group: 'labs' },
+    ldl: { step: 0.01, group: 'labs' },
+    glu: { step: 0.1, group: 'labs' },
+    crea: { step: 1, group: 'labs' },
   };
-  const GROUPS = [
-    ['demo', 'Demographics'],
-    ['vitals', 'On admission'],
-    ['comorb', 'Comorbidities'],
-    ['event', 'Index event'],
-    ['treat', 'Treatment and follow-up'],
-    ['labs', 'Laboratory'],
-  ];
-  const OUTCOME = ['Alive / censored', 'CVD death'];
+  const GROUPS = ['demo', 'vitals', 'comorb', 'event', 'treat', 'labs'];
+
+  const { t } = I18N;
+  const outcome = (target) => t(`outcome.${target}`);
 
   // ---------------------------------------------------------------------------
   // Вспомогательные функции
@@ -90,7 +85,9 @@
   }
 
   const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
-  const fmtDays = (v) => Math.round(v).toLocaleString('en-US');
+  const fmtDays = (v) => I18N.int(v);
+  const days = (v) => t('days', { n: fmtDays(v) });
+  // Значение для поля ввода — всегда с точкой; для подписей — I18N.num по правилам языка
   const fmtValue = (v) => String(+(+v).toFixed(4));
   const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
@@ -142,7 +139,7 @@
       }
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
-          perplexity: state.perplexity, model: state.model, selected: state.selected, theme: state.theme, edits,
+          perplexity: state.perplexity, model: state.model, selected: state.selected, theme: state.theme, lang: I18N.lang, edits,
         }));
       } catch (e) { /* хранилище недоступно — состояние живёт только до перезагрузки */ }
     }, 200);
@@ -395,15 +392,15 @@
   function showTooltip(i, px, py) {
     const m = state.model;
     const rows = [
-      [`${PATIENTS.time[i].toLocaleString('en-US')} days`, 'time (dataset)'],
-      [OUTCOME[PATIENTS.target[i]], `outcome, target = ${PATIENTS.target[i]}`],
-      [`${fmtDays(baseTime[m][i])} days`, `predicted time, ${MODELS[m]}`],
+      [days(PATIENTS.time[i]), t('tt.time')],
+      [outcome(PATIENTS.target[i]), t('tt.outcome', { t: PATIENTS.target[i] })],
+      [days(baseTime[m][i]), t('tt.pred', { model: MODELS[m] })],
     ];
-    if (editedSet.has(i)) rows.push([`${fmtDays(curTime[m][i])} days`, `predicted with ${editedFeatures(i).length} edited parameter(s)`]);
+    if (editedSet.has(i)) rows.push([days(curTime[m][i]), t('tt.predEdit')]);
     tooltip.replaceChildren(
       el('div', { class: 'tt-title' },
         el('span', { class: `dot t${PATIENTS.target[i]}` }),
-        `ID ${PATIENTS.id[i]} · row ${i}${PATIENTS.test[i] ? ' · held-out' : ''}`),
+        t('tt.title', { id: PATIENTS.id[i], row: i }) + (PATIENTS.test[i] ? t('tt.heldOut') : '')),
       ...rows.map(([value, label]) => el('div', { class: 'tt-row' }, el('b', { text: value }), el('span', { text: label }))),
     );
     tooltip.style.display = 'block';
@@ -446,8 +443,8 @@
 
   function updateStatus() {
     const text = tsneRunning
-      ? `Computing t-SNE: iteration ${tsne ? tsne.iter : 0} / 1000 · perplexity ${state.perplexity}`
-      : `t-SNE · perplexity ${state.perplexity} · KL divergence ${tsneKL === null ? '…' : tsneKL.toFixed(3)} · ${editedSet.size} edited patient(s)`;
+      ? t('status.running', { i: tsne ? tsne.iter : 0, p: state.perplexity })
+      : t('status.done', { p: state.perplexity, kl: tsneKL === null ? '…' : I18N.fixed(tsneKL, 3), n: editedSet.size });
     $('tsne-status').textContent = text;
   }
 
@@ -461,27 +458,29 @@
     const cur = edited ? predictor.predict(state.values[i], m) : base;
     const time = PATIENTS.time[i], target = PATIENTS.target[i];
 
-    $('prediction-sub').textContent = `patient ID ${PATIENTS.id[i]} · ${MODELS[m]}`;
-    $('hero-label').textContent = edited ? `With your edits · ${MODELS[m]}` : `Dataset values · ${MODELS[m]}`;
-    $('hero-value').replaceChildren(fmtDays(cur.rmst), el('span', { class: 'unit', text: 'days' }));
+    $('prediction-sub').textContent = t('pred.sub', { id: PATIENTS.id[i], model: MODELS[m] });
+    $('hero-label').textContent = t(edited ? 'hero.edited' : 'hero.dataset', { model: MODELS[m] });
+    $('hero-value').replaceChildren(fmtDays(cur.rmst), el('span', { class: 'unit', text: t('unit.days') }));
     if (edited) {
       const diff = cur.rmst - base.rmst;
       const arrow = diff > 0.5 ? '▲' : diff < -0.5 ? '▼' : '';
       $('hero-delta').replaceChildren(
-        el('b', { text: `${arrow} ${diff >= 0 ? '+' : '−'}${fmtDays(Math.abs(diff))} days` }),
-        ` vs dataset values (${fmtDays(base.rmst)} days)`);
+        el('b', { text: `${arrow} ${diff >= 0 ? '+' : '−'}${days(Math.abs(diff))}` }),
+        t('hero.delta', { v: fmtDays(base.rmst) }));
     } else {
-      $('hero-delta').textContent = 'Edit a parameter to re-predict.';
+      $('hero-delta').textContent = t('hero.hint');
     }
 
+    const median = (p) => (p.median === null ? t('fact.beyond', { tau: fmtDays(TAU) }) : days(p.median));
     const fact = (term, value, note) => el('div', {}, el('dt', { text: term }), el('dd', {}, value, el('small', { text: note })));
     $('facts').replaceChildren(
-      fact('time in dataset', `${time.toLocaleString('en-US')} days`, `${OUTCOME[target]} · target = ${target}`),
-      fact('P(alive at τ)', cur.sTau.toFixed(2), edited ? `dataset values: ${base.sTau.toFixed(2)}` : 'S(τ), τ = 1500 days'),
-      fact('median survival', cur.median === null ? `> ${TAU} days` : `${fmtDays(cur.median)} days`,
-        edited ? `dataset values: ${base.median === null ? `> ${TAU}` : fmtDays(base.median)}` : 'first day with S(t) ≤ 0.5'),
+      fact(t('fact.time'), days(time), t('fact.outcome', { outcome: outcome(target), t: target })),
+      fact(t('fact.alive'), I18N.fixed(cur.sTau, 2),
+        edited ? t('fact.datasetValue', { v: I18N.fixed(base.sTau, 2) }) : t('fact.aliveNote', { tau: fmtDays(TAU) })),
+      fact(t('fact.median'), median(cur),
+        edited ? t('fact.datasetValue', { v: median(base) }) : t('fact.medianNote', { half: I18N.fixed(0.5, 1) })),
     );
-    $('hero-sub').textContent = `expected days alive within τ = ${TAU} days (RMST); compare with min(time, τ) = ${Math.min(time, TAU).toLocaleString('en-US')}`;
+    $('hero-sub').textContent = t('hero.sub', { tau: fmtDays(TAU), v: fmtDays(Math.min(time, TAU)) });
 
     renderSurvivalChart(base.curve, edited ? cur.curve : null, time, target);
     renderModelTable();
@@ -496,10 +495,10 @@
       radio.addEventListener('change', () => setModel(m));
       const tr = el('tr', { class: m === state.model ? 'active' : '' },
         el('td', {}, el('label', {}, radio, MODELS[m])),
-        el('td', { text: BUNDLE.metrics[m].c_index.toFixed(3) }),
-        el('td', { text: BUNDLE.metrics[m].brier_s_tau.toFixed(3) }),
-        el('td', { text: `${fmtDays(baseTime[m][i])} d` }),
-        el('td', { text: edited ? `${fmtDays(curTime[m][i])} d` : '—' }));
+        el('td', { text: I18N.fixed(BUNDLE.metrics[m].c_index, 3) }),
+        el('td', { text: I18N.fixed(BUNDLE.metrics[m].brier_s_tau, 3) }),
+        el('td', { text: t('days.short', { n: fmtDays(baseTime[m][i]) }) }),
+        el('td', { text: edited ? t('days.short', { n: fmtDays(curTime[m][i]) }) : '—' }));
       tr.addEventListener('click', (e) => { if (e.target !== radio) setModel(m); });
       return tr;
     }));
@@ -509,11 +508,11 @@
     const i = state.selected, m = state.model;
     const edited = editedSet.has(i);
     const predicted = edited
-      ? [el('b', { text: fmtDays(baseTime[m][i]) }), ' → ', el('b', { text: `${fmtDays(curTime[m][i])} days` })]
-      : [el('b', { text: `${fmtDays(baseTime[m][i])} days` })];
+      ? [el('b', { text: fmtDays(baseTime[m][i]) }), ' → ', el('b', { text: days(curTime[m][i]) })]
+      : [el('b', { text: days(baseTime[m][i]) })];
     $('mini-summary').replaceChildren(
-      el('span', {}, 'time in dataset ', el('b', { text: `${PATIENTS.time[i].toLocaleString('en-US')} days` })),
-      el('span', {}, `predicted (${MODELS[m]}) `, ...predicted),
+      el('span', {}, t('mini.time'), el('b', { text: days(PATIENTS.time[i]) })),
+      el('span', {}, t('mini.pred', { model: MODELS[m] }), ...predicted),
     );
   }
 
@@ -530,24 +529,24 @@
     const { baseCurve, editCurve, time, target } = chartData;
     const W = host.clientWidth || 600, H = 250;
     const m = { l: 40, r: 14, t: 24, b: 30 };
-    const x = (t) => m.l + (t / TAU) * (W - m.l - m.r);
+    const x = (day) => m.l + (day / TAU) * (W - m.l - m.r);
     const y = (s) => m.t + (1 - s) * (H - m.t - m.b);
     const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, width: W, height: H, tabindex: 0, role: 'img',
-      'aria-label': `Survival function of patient ID ${PATIENTS.id[state.selected]}. Use the arrow keys to read values.` });
+      'aria-label': t('chart.aria', { id: PATIENTS.id[state.selected] }) });
 
     for (const s of [0, 0.25, 0.5, 0.75, 1]) {
       root.append(svg('line', { class: s === 0 ? 'ax-base' : 'ax-grid', x1: m.l, x2: W - m.r, y1: y(s), y2: y(s) }));
-      root.append(svg('text', { class: 'ax-text', x: m.l - 8, y: y(s) + 4, 'text-anchor': 'end', text: s.toFixed(2) }));
+      root.append(svg('text', { class: 'ax-text', x: m.l - 8, y: y(s) + 4, 'text-anchor': 'end', text: I18N.fixed(s, 2) }));
     }
-    for (let t = 0; t <= TAU; t += 250) {
-      root.append(svg('text', { class: 'ax-text', x: x(t), y: H - m.b + 16, 'text-anchor': 'middle', text: t.toLocaleString('en-US') }));
+    for (let day = 0; day <= TAU; day += 250) {
+      root.append(svg('text', { class: 'ax-text', x: x(day), y: H - m.b + 16, 'text-anchor': 'middle', text: fmtDays(day) }));
     }
-    root.append(svg('text', { class: 'ax-title', x: m.l, y: 12, text: 'S(t), probability to be alive' }));
-    root.append(svg('text', { class: 'ax-title', x: W - m.r, y: H - 2, 'text-anchor': 'end', text: 'days' }));
+    root.append(svg('text', { class: 'ax-title', x: m.l, y: 12, text: t('chart.y') }));
+    root.append(svg('text', { class: 'ax-title', x: W - m.r, y: H - 2, 'text-anchor': 'end', text: t('chart.x') }));
 
     const path = (curve) => {
       let d = '';
-      for (let t = 0; t < curve.length; t += 3) d += `${t ? 'L' : 'M'}${x(t).toFixed(1)},${y(curve[t]).toFixed(1)}`;
+      for (let day = 0; day < curve.length; day += 3) d += `${day ? 'L' : 'M'}${x(day).toFixed(1)},${y(curve[day]).toFixed(1)}`;
       return d + `L${x(curve.length - 1).toFixed(1)},${y(curve[curve.length - 1]).toFixed(1)}`;
     };
     const shown = editCurve || baseCurve;
@@ -564,10 +563,10 @@
       root.append(svg('line', { class: 'event-line', x1: x(time), x2: x(time), y1: y(1), y2: y(0) }));
       const right = x(time) < W * 0.6;
       root.append(svg('text', { class: 'event-label', x: x(time) + (right ? 6 : -6), y: labelY, 'text-anchor': right ? 'start' : 'end',
-        text: `${target ? 'CVD death' : 'censored'} on day ${time.toLocaleString('en-US')} (dataset)` }));
+        text: t(target ? 'chart.deathBefore' : 'chart.censoredBefore', { d: fmtDays(time) }) }));
     } else {
       root.append(svg('text', { class: 'event-label', x: W - m.r - 4, y: labelY, 'text-anchor': 'end',
-        text: target ? `CVD death on day ${time.toLocaleString('en-US')}, after τ (dataset)` : `alive at τ, followed ${time.toLocaleString('en-US')} days (dataset)` }));
+        text: t(target ? 'chart.deathAfter' : 'chart.aliveAfter', { d: fmtDays(time) }) }));
     }
 
     const cross = svg('g', { visibility: 'hidden' });
@@ -582,8 +581,8 @@
 
     const tip = el('div', { class: 'tooltip' });
     let current = -1;
-    const show = (t) => {
-      current = clamp(Math.round(t), 0, TAU - 1);
+    const show = (day) => {
+      current = clamp(Math.round(day), 0, TAU - 1);
       const cx = x(current);
       crossLine.setAttribute('x1', cx);
       crossLine.setAttribute('x2', cx);
@@ -594,11 +593,11 @@
         dotEdit.setAttribute('cy', y(editCurve[current]));
       }
       cross.setAttribute('visibility', 'visible');
-      const rows = [[baseCurve[current], 'S(t), dataset values', cssVar('--ink-2')]];
-      if (editCurve) rows.push([editCurve[current], 'S(t), with edits', cssVar('--edit')]);
-      tip.replaceChildren(el('div', { class: 'tt-title', text: `Day ${current.toLocaleString('en-US')}` }),
+      const rows = [[baseCurve[current], t('chart.sBase'), cssVar('--ink-2')]];
+      if (editCurve) rows.push([editCurve[current], t('chart.sEdit'), cssVar('--edit')]);
+      tip.replaceChildren(el('div', { class: 'tt-title', text: t('chart.day', { d: fmtDays(current) }) }),
         ...rows.map(([v, label, color]) => el('div', { class: 'tt-row' },
-          el('span', { class: 'tt-key', style: `background:${color}` }), el('b', { text: v.toFixed(3) }), el('span', { text: label }))));
+          el('span', { class: 'tt-key', style: `background:${color}` }), el('b', { text: I18N.fixed(v, 3) }), el('span', { text: label }))));
       tip.style.display = 'block';
       const tw = tip.offsetWidth;
       tip.style.left = `${cx + 12 + tw > W ? cx - 12 - tw : cx + 12}px`;
@@ -624,8 +623,8 @@
 
     host.replaceChildren(root, tip);
     $('survival-legend').replaceChildren(...(editCurve
-      ? [el('span', { class: 'key' }, el('span', { class: 'line-key', style: `background:${cssVar('--ink-2')}` }), 'dataset values'),
-        el('span', { class: 'key' }, el('span', { class: 'line-key', style: `background:${cssVar('--edit')}` }), 'with your edits')]
+      ? [el('span', { class: 'key' }, el('span', { class: 'line-key', style: `background:${cssVar('--ink-2')}` }), t('chart.legendBase')),
+        el('span', { class: 'key' }, el('span', { class: 'line-key', style: `background:${cssVar('--edit')}` }), t('chart.legendEdit'))]
       : []));
   }
 
@@ -639,29 +638,31 @@
   });
   const inputs = {}; // feature → { row, range, num, orig }
 
-  function encoding(info) {
-    if (info.levels) return info.levels.map((name, v) => `${v} ${name}`).join(', ');
-    return info.unit;
+  function encoding(text) {
+    if (text.levels) return text.levels.map((name, v) => `${v} ${name}`).join(', ');
+    return text.unit;
   }
 
+  // Строится заново при смене языка
   function buildEditor() {
     const list = $('param-list');
-    for (const [group, title] of GROUPS) {
-      const section = el('div', { class: 'group' }, el('h3', { text: title }));
+    list.replaceChildren();
+    for (const group of GROUPS) {
+      const section = el('div', { class: 'group' }, el('h3', { text: t(`group.${group}`) }));
       for (const f of FEATURES.filter((name) => FEATURE_INFO[name].group === group)) {
         const k = FEATURES.indexOf(f);
-        const info = FEATURE_INFO[f];
+        const text = I18N.feature(f);
         const [lo, hi] = ranges[k];
-        const step = info.levels ? 1 : info.step;
-        const range = el('input', { type: 'range', min: lo, max: hi, step, id: `range-${f}`, 'aria-label': `${info.label} slider` });
+        const step = text.levels ? 1 : FEATURE_INFO[f].step;
+        const range = el('input', { type: 'range', min: lo, max: hi, step, id: `range-${f}`, 'aria-label': t('param.slider', { label: text.label }) });
         const num = el('input', { type: 'number', step: 'any', id: `num-${f}`, inputmode: 'decimal' });
-        const reset = el('button', { class: 'reset', type: 'button', 'aria-label': `Reset ${info.label} to the dataset value`, title: 'Reset to the dataset value', text: '↺' });
+        const reset = el('button', { class: 'reset', type: 'button', 'aria-label': t('param.reset', { label: text.label }), title: t('param.resetTitle'), text: '↺' });
         const orig = el('span', { class: 'param-orig' });
         const row = el('div', { class: 'param' },
           el('div', { class: 'param-head' },
             el('span', { class: 'param-name' },
-              el('label', { for: `num-${f}`, text: info.label }), el('code', { text: f }),
-              el('span', { class: 'param-enc', text: ` · ${encoding(info)}` })),
+              el('label', { for: `num-${f}`, text: text.label }), el('code', { text: f }),
+              el('span', { class: 'param-enc', text: ` · ${encoding(text)}` })),
             orig),
           range, num, reset);
 
@@ -705,14 +706,14 @@
     FEATURES.forEach((f, k) => {
       const { row, range, num, reset, orig } = inputs[f];
       const v = state.values[i][k], o = PATIENTS.X[i][k];
-      const info = FEATURE_INFO[f];
+      const { levels } = I18N.feature(f);
       if (document.activeElement !== num) num.value = fmtValue(v);
       if (document.activeElement !== range) range.value = v;
       const edited = v !== o;
       row.classList.toggle('edited', edited);
       reset.disabled = !edited;
-      const level = info.levels && info.levels[o] !== undefined ? ` (${info.levels[o]})` : '';
-      orig.textContent = edited ? `dataset: ${fmtValue(o)}${level}` : `dataset${level}`;
+      const level = levels && levels[o] !== undefined ? ` (${levels[o]})` : '';
+      orig.textContent = edited ? t('param.datasetValue', { v: I18N.num(o) }) + level : t('param.dataset') + level;
     });
   }
 
@@ -721,14 +722,15 @@
     const idInput = $('patient-id');
     if (document.activeElement !== idInput) idInput.value = PATIENTS.id[i];
     $('patient-row').value = i;
-    $('patient-row-out').textContent = `row ${i} of ${N - 1}`;
+    $('patient-row-out').textContent = t('patient.rowOf', { i, max: N - 1 });
     const nEdited = editedSet.has(i) ? editedFeatures(i).length : 0;
-    const resetBtn = el('button', { type: 'button', disabled: nEdited === 0, text: 'Reset patient' });
+    const resetBtn = el('button', { type: 'button', disabled: nEdited === 0, text: t('patient.reset') });
     resetBtn.addEventListener('click', () => resetPatient(i));
     $('patient-badges').replaceChildren(...[
-      el('span', { class: 'badge' }, el('span', { class: `dot t${PATIENTS.target[i]}` }), `${OUTCOME[PATIENTS.target[i]]} · target = ${PATIENTS.target[i]}`),
-      el('span', { class: 'badge', text: PATIENTS.test[i] ? 'held-out test patient' : 'training patient' }),
-      nEdited ? el('span', { class: 'badge' }, el('span', { class: 'ring-sm' }), `${nEdited} edited parameter(s)`) : null,
+      el('span', { class: 'badge' }, el('span', { class: `dot t${PATIENTS.target[i]}` }),
+        t('fact.outcome', { outcome: outcome(PATIENTS.target[i]), t: PATIENTS.target[i] })),
+      el('span', { class: 'badge', text: t(PATIENTS.test[i] ? 'patient.test' : 'patient.train') }),
+      nEdited ? el('span', { class: 'badge' }, el('span', { class: 'ring-sm' }), t('patient.edited', { n: nEdited })) : null,
       resetBtn,
     ].filter(Boolean));
   }
@@ -739,18 +741,18 @@
   const tableRows = [];
   const sortState = { key: 'row', dir: 1 };
   const COLUMNS = [
-    ['row', 'Row', (i) => i],
-    ['id', 'ID', (i) => PATIENTS.id[i]],
-    ['target', 'Outcome', (i) => PATIENTS.target[i]],
-    ['time', 'time, days', (i) => PATIENTS.time[i]],
-    ['pred', 'Predicted, days', (i) => baseTime[state.model][i]],
-    ['edited', 'With edits, days', (i) => (editedSet.has(i) ? curTime[state.model][i] : -1)],
+    ['row', 'table.row', (i) => i],
+    ['id', 'table.id', (i) => PATIENTS.id[i]],
+    ['target', 'table.outcome', (i) => PATIENTS.target[i]],
+    ['time', 'table.time', (i) => PATIENTS.time[i]],
+    ['pred', 'table.pred', (i) => baseTime[state.model][i]],
+    ['edited', 'table.edit', (i) => (editedSet.has(i) ? curTime[state.model][i] : -1)],
   ];
 
   function buildTable() {
     const head = $('patients-table').tHead.rows[0];
-    for (const [key, title] of COLUMNS) {
-      const button = el('button', { type: 'button', text: title });
+    for (const [key] of COLUMNS) {
+      const button = el('button', { type: 'button' });
       button.addEventListener('click', () => {
         sortState.dir = sortState.key === key ? -sortState.dir : 1;
         sortState.key = key;
@@ -776,8 +778,8 @@
     tableRows[i].replaceChildren(
       el('td', { text: i }),
       el('td', { text: PATIENTS.id[i] }),
-      el('td', {}, el('span', { class: 'outcome' }, el('span', { class: `dot t${PATIENTS.target[i]}` }), OUTCOME[PATIENTS.target[i]])),
-      el('td', { text: PATIENTS.time[i].toLocaleString('en-US') }),
+      el('td', {}, el('span', { class: 'outcome' }, el('span', { class: `dot t${PATIENTS.target[i]}` }), outcome(PATIENTS.target[i]))),
+      el('td', { text: fmtDays(PATIENTS.time[i]) }),
       el('td', { text: fmtDays(baseTime[m][i]) }),
       el('td', { text: editedSet.has(i) ? fmtDays(curTime[m][i]) : '—' }),
     );
@@ -790,7 +792,7 @@
     [...$('patients-table').tHead.rows[0].cells].forEach((th, c) => {
       const sorted = COLUMNS[c][0] === sortState.key;
       th.setAttribute('aria-sort', sorted ? (sortState.dir > 0 ? 'ascending' : 'descending') : 'none');
-      th.firstChild.textContent = COLUMNS[c][1] + (sorted ? (sortState.dir > 0 ? ' ▲' : ' ▼') : '');
+      th.firstChild.textContent = t(COLUMNS[c][1]) + (sorted ? (sortState.dir > 0 ? ' ▲' : ' ▼') : '');
     });
   }
 
@@ -889,18 +891,43 @@
     readColors();
     drawMap();
     drawSurvivalChart();
-    $('theme-toggle').setAttribute('aria-label', effectiveDark() ? 'Switch to light theme' : 'Switch to dark theme');
+    $('theme-toggle').setAttribute('aria-label', t(effectiveDark() ? 'theme.toLight' : 'theme.toDark'));
+  }
+
+  // Тексты, которые собирает сам скрипт (статичные переводит I18N.applyStatic)
+  const counts = [0, 0];
+  PATIENTS.target.forEach((target) => counts[target]++);
+  function renderTexts() {
+    $('legend-t0').textContent = t('legend.t0', { n: counts[0] });
+    $('legend-t1').textContent = t('legend.t1', { n: counts[1] });
+    $('generated').textContent = t('footer.generated', { date: BUNDLE.meta.generated });
+    $('theme-toggle').setAttribute('aria-label', t(effectiveDark() ? 'theme.toLight' : 'theme.toDark'));
+    updateStatus();
+  }
+
+  function setLang(lang) {
+    if (lang === I18N.lang) return;
+    I18N.setLang(lang);
+    $('patient-msg').textContent = '';
+    renderTexts();
+    buildEditor();
+    syncEditor();
+    renderPatientBar();
+    renderPrediction();
+    for (let i = 0; i < N; i++) updateTableRow(i);
+    sortTable();
+    if (state.hovered >= 0) hideTooltip();
+    save();
   }
 
   // ---------------------------------------------------------------------------
   // Инициализация
   // ---------------------------------------------------------------------------
   function init() {
-    const counts = [0, 0];
-    PATIENTS.target.forEach((t) => counts[t]++);
-    $('legend-t0').textContent = `Alive / censored (target = 0), n = ${counts[0]}`;
-    $('legend-t1').textContent = `CVD death (target = 1), n = ${counts[1]}`;
-    $('generated').textContent = `models re-trained ${BUNDLE.meta.generated} by scripts/survival_time_predictor.py`;
+    renderTexts();
+    document.querySelectorAll('[data-lang]').forEach((button) => {
+      button.addEventListener('click', () => setLang(button.dataset.lang));
+    });
 
     const select = $('model-select');
     for (const m of MODEL_KEYS) select.append(el('option', { value: m, text: MODELS[m] }));
@@ -923,7 +950,7 @@
     $('patient-id').addEventListener('change', (e) => {
       const i = PATIENTS.id.indexOf(Number(e.target.value));
       if (i >= 0) selectPatient(i);
-      else $('patient-msg').textContent = `No patient with ID ${e.target.value}`;
+      else $('patient-msg').textContent = t('patient.notFound', { id: e.target.value });
     });
 
     $('reset-all').addEventListener('click', resetAll);

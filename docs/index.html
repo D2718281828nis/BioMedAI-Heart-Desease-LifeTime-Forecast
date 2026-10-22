@@ -104,6 +104,11 @@
   button:hover:not(:disabled) { background: var(--wash); }
   button:disabled { opacity: 0.45; cursor: default; }
   .icon-btn { width: 32px; height: 30px; padding: 0; display: inline-grid; place-items: center; }
+  .top-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+  .lang { display: inline-flex; border: 1px solid var(--border-strong); border-radius: 6px; overflow: hidden; }
+  .lang button { border: 0; border-radius: 0; height: 28px; padding: 0 10px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+  .lang button + button { border-left: 1px solid var(--border-strong); }
+  .lang button[aria-pressed="true"] { background: var(--ink); color: var(--surface); cursor: default; }
 
   .toolbar {
     display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px;
@@ -276,58 +281,59 @@
 <div class="page">
   <header class="top">
     <div>
-      <h1>Survival time explorer</h1>
-      <p class="lede">
-        408 patients after acute coronary syndrome from <code>balanced_dataset.csv</code>. The map is a t-SNE of their
-        30 clinical parameters, colored by outcome. Select a patient and change any parameter: the point moves on the
-        map and the time is re-predicted with the survival models of
-        <a href="https://github.com/D2718281828nis/BioMedAI-Heart-Desease-LifeTime-Forecast/blob/main/Survival-function-analysys.ipynb">Survival-function-analysys.ipynb</a>.
-      </p>
+      <h1 data-i18n="h1">Survival time explorer</h1>
+      <p class="lede" data-i18n-html="lede"></p>
     </div>
-    <button id="theme-toggle" class="icon-btn" type="button" aria-label="Switch theme" title="Switch theme">
-      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/></svg>
-    </button>
+    <div class="top-actions">
+      <div class="lang" role="group" data-i18n-aria-label="lang.group" aria-label="Language">
+        <button type="button" data-lang="en" lang="en" aria-pressed="true">EN</button>
+        <button type="button" data-lang="ru" lang="ru" aria-pressed="false">RU</button>
+      </div>
+      <button id="theme-toggle" class="icon-btn" type="button" aria-label="Switch theme">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.5a6.5 6.5 0 0 1 0 13z" fill="currentColor"/></svg>
+      </button>
+    </div>
   </header>
 
-  <div class="toolbar" role="group" aria-label="Map and model settings">
+  <div class="toolbar" role="group" data-i18n-aria-label="toolbar.aria">
     <div class="control">
-      <label for="perplexity-range">t-SNE perplexity</label>
+      <label for="perplexity-range" data-i18n="perplexity.label"></label>
       <input id="perplexity-range" type="range" min="2" max="100" step="1">
-      <input id="perplexity-num" type="number" min="2" max="100" step="1" aria-label="Perplexity value">
+      <input id="perplexity-num" type="number" min="2" max="100" step="1" data-i18n-aria-label="perplexity.aria">
     </div>
     <div class="control">
-      <label for="model-select">Survival model</label>
+      <label for="model-select" data-i18n="model.label"></label>
       <select id="model-select"></select>
     </div>
     <div class="spacer"></div>
-    <button id="reset-all" type="button">Reset all edits</button>
-    <button id="download" type="button">Download CSV</button>
+    <button id="reset-all" type="button" data-i18n="resetAll"></button>
+    <button id="download" type="button" data-i18n="download"></button>
   </div>
 
   <main class="layout">
     <section class="card" id="map-card" aria-labelledby="map-title">
       <div class="card-head">
-        <h2 id="map-title">t-SNE map of patients</h2>
+        <h2 id="map-title" data-i18n="map.title"></h2>
         <div class="legend" id="map-legend">
-          <span class="key"><span class="dot t1"></span><span id="legend-t1">CVD death (target = 1)</span></span>
-          <span class="key"><span class="dot t0"></span><span id="legend-t0">Alive / censored (target = 0)</span></span>
-          <span class="key"><span class="ring"></span>Selected</span>
-          <span class="key"><span class="edit-key"><i></i><b></b><em></em></span>Edited: dataset position → new position</span>
+          <span class="key"><span class="dot t1"></span><span id="legend-t1"></span></span>
+          <span class="key"><span class="dot t0"></span><span id="legend-t0"></span></span>
+          <span class="key"><span class="ring"></span><span data-i18n="legend.selected"></span></span>
+          <span class="key"><span class="edit-key"><i></i><b></b><em></em></span><span data-i18n="legend.edited"></span></span>
         </div>
       </div>
       <div class="map-wrap" id="map-wrap">
-        <canvas id="map" tabindex="0" role="img" aria-label="t-SNE map of 408 patients colored by outcome. Hover a point to see its time; click to select it. The same data is in the table view below."></canvas>
+        <canvas id="map" tabindex="0" role="img" data-i18n-aria-label="map.aria"></canvas>
         <div class="tooltip" id="map-tooltip" role="status"></div>
       </div>
       <div class="map-foot">
-        <span id="tsne-status">Computing t-SNE…</span>
-        <span>Hover a point to see its time · click to select</span>
+        <span id="tsne-status" data-i18n="status.initial"></span>
+        <span data-i18n="map.hint"></span>
       </div>
     </section>
 
     <section class="card" id="prediction-card" aria-labelledby="prediction-title">
       <div class="card-head">
-        <h2 id="prediction-title">Predicted time</h2>
+        <h2 id="prediction-title" data-i18n="pred.title"></h2>
         <span class="card-sub" id="prediction-sub"></span>
       </div>
       <div class="pred-top">
@@ -341,16 +347,16 @@
       </div>
       <div class="chart" id="survival-chart"></div>
       <div class="chart-legend" id="survival-legend"></div>
-      <p class="chart-note">Survival function S(t) of the selected patient. The shaded area under it is the predicted time: RMST(τ) = ∫₀<sup>τ</sup> S(t) dt.</p>
+      <p class="chart-note" data-i18n-html="chart.note"></p>
       <div class="table-scroll">
-        <table class="models" id="model-table" aria-label="Predicted time of the selected patient by every model">
+        <table class="models" id="model-table" data-i18n-aria-label="models.aria">
           <thead>
             <tr>
-              <th scope="col">Model</th>
-              <th scope="col">C-index (test)</th>
-              <th scope="col">Brier S(τ)</th>
-              <th scope="col">Time, dataset values</th>
-              <th scope="col">Time, edited</th>
+              <th scope="col" data-i18n="models.model"></th>
+              <th scope="col" data-i18n="models.cindex"></th>
+              <th scope="col" data-i18n="models.brier"></th>
+              <th scope="col" data-i18n="models.base"></th>
+              <th scope="col" data-i18n="models.edit"></th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -361,15 +367,15 @@
     <section class="card" id="editor-card" aria-labelledby="patient-title">
       <div class="patient-bar">
         <div class="patient-row">
-          <h2 id="patient-title">Patient</h2>
-          <button id="prev-patient" class="icon-btn" type="button" aria-label="Previous patient">‹</button>
-          <label for="patient-id" class="msg">ID</label>
+          <h2 id="patient-title" data-i18n="patient.title"></h2>
+          <button id="prev-patient" class="icon-btn" type="button" data-i18n-aria-label="patient.prev">‹</button>
+          <label for="patient-id" class="msg" data-i18n="patient.id"></label>
           <input id="patient-id" type="number" min="0" step="1" inputmode="numeric">
-          <button id="next-patient" class="icon-btn" type="button" aria-label="Next patient">›</button>
+          <button id="next-patient" class="icon-btn" type="button" data-i18n-aria-label="patient.next">›</button>
           <span class="msg" id="patient-msg" role="status"></span>
         </div>
         <div class="patient-row">
-          <label for="patient-row" class="msg">Row</label>
+          <label for="patient-row" class="msg" data-i18n="patient.row"></label>
           <input id="patient-row" type="range" min="0" step="1">
           <output id="patient-row-out" for="patient-row"></output>
         </div>
@@ -380,7 +386,7 @@
     </section>
 
     <details class="card" id="table-card">
-      <summary>Table view <span class="card-sub">all patients, sortable; click a row to select</span></summary>
+      <summary><span data-i18n="table.summary"></span> <span class="card-sub" data-i18n="table.sub"></span></summary>
       <div class="patients-scroll">
         <table class="patients" id="patients-table">
           <thead><tr></tr></thead>
@@ -390,23 +396,19 @@
     </details>
 
     <section class="card method" id="method-card" aria-labelledby="method-title">
-      <h2 id="method-title">How it works</h2>
-      <ul>
-        <li><b>Time prediction</b> follows <i>Survival-function-analysys.ipynb</i>: a model gives the survival function S(t) of the patient, and the predicted time is RMST(τ), the area under S(t) up to τ = 1500 days. It is compared with min(time, τ) from the dataset.</li>
-        <li><b>Models</b> (CoxPH, Weibull AFT, XGBoost Cox, NN and reservoir network with Cox calibration) are trained exactly as in the notebook: the same 326 training patients (stratified split, <code>random_state=37</code>), <code>StandardScaler</code> and hyperparameters. C-index and Brier score are measured on the 82 held-out patients.</li>
-        <li><b>t-SNE</b> is computed in the browser on the 30 standardized parameters (exact method, PCA initialization, 1000 iterations, as in scikit-learn). When you edit a patient, it is placed onto the fixed map by out-of-sample t-SNE: only that point moves, from its dataset position (hollow circle) to the new one.</li>
-        <li>The same prediction from the command line:</li>
-      </ul>
+      <h2 id="method-title" data-i18n="method.title"></h2>
+      <ul data-i18n-html="method.list"></ul>
       <pre><code>python scripts/survival_time_predictor.py predict --id 1444 --set age=70 llo=1</code></pre>
     </section>
   </main>
 
   <footer id="footer">
     <a href="https://github.com/D2718281828nis/BioMedAI-Heart-Desease-LifeTime-Forecast">BioMedAI-Heart-Desease-LifeTime-Forecast</a> ·
-    MIT license · <span id="generated"></span>
+    <span data-i18n="footer.license"></span> · <span id="generated"></span>
   </footer>
 </div>
 
+<script src="i18n.js"></script>
 <script src="survival_model.js"></script>
 <script src="survival_predictor.js"></script>
 <script src="tsne.js"></script>
