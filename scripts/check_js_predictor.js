@@ -28,4 +28,18 @@ for (const [name, title] of Object.entries(bundle.meta.model_names)) {
   console.log(`${ok ? 'OK  ' : 'FAIL'} ${title.padEnd(12)} max |Δ|: RMST ${maxDiff.rmst.toExponential(2)} дн., ` +
     `прогноз ${maxDiff.time} дн. (${bundle.patients.X.length} пациентов)`);
 }
+// Конвейер: вероятности групп и справочная маршрутизация (группа, время внутри неё)
+const ref = bundle.reference_staged;
+const routeDiff = { P: 0, group: 0, time: 0, cluster: 0 };
+bundle.patients.X.forEach((x, i) => {
+  const { stage } = predictor.predict(x, 'stg');
+  stage.P.forEach((p, k) => { routeDiff.P = Math.max(routeDiff.P, Math.abs(p - ref.P[i][k])); });
+  routeDiff.group += stage.group !== ref.group[i];
+  routeDiff.cluster += stage.cluster !== ref.cluster[i];
+  routeDiff.time = Math.max(routeDiff.time, Math.abs(stage.routeTime - ref.time[i]));
+});
+const routeOk = routeDiff.P < 1e-6 && routeDiff.group === 0 && routeDiff.time <= 1 && routeDiff.cluster === 0;
+failed ||= !routeOk;
+console.log(`${routeOk ? 'OK  ' : 'FAIL'} Конвейер: кластеров не совпало ${routeDiff.cluster}, группы max |ΔP| ${routeDiff.P.toExponential(2)}, ` +
+  `несовпадений группы ${routeDiff.group}, время группы max |Δ| ${routeDiff.time} дн.`);
 process.exit(failed ? 1 : 0);

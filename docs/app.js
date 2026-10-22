@@ -19,9 +19,9 @@
   const MODELS = BUNDLE.meta.model_names;
   const MODEL_KEYS = Object.keys(MODELS);
   // Модель по умолчанию — своя для каждой популяции: для balanced_dataset.csv (исход к τ известен у всех) —
-  // модель, обученная на этой популяции; для всей когорты — CoxPH (лучшие IBS и AUC на отложенной выборке).
-  // Метрики в таблице моделей тоже считаются на отложенных пациентах выбранного датасета
-  const DEFAULT_MODELS = { balanced: 'bal', full: 'cph' };
+  // многоэтапный конвейер, обученный на этой популяции; для всей когорты — CoxPH (лучшие IBS и AUC на отложенной
+  // выборке). Метрики в таблице моделей тоже считаются на отложенных пациентах выбранного датасета
+  const DEFAULT_MODELS = { balanced: 'stg', full: 'cph' };
   // Признаки, которые модели не используют (известны только после выписки)
   const MODEL_FEATURES = new Set(BUNDLE.model_features || BUNDLE.features);
   const DEFAULT_DATASET = 'balanced';
@@ -148,8 +148,9 @@
   const state = {
     dataset: DATASETS[saved.dataset] ? saved.dataset : DEFAULT_DATASET,
     perplexity: Number.isFinite(saved.perplexity) ? clamp(Math.round(saved.perplexity), 2, 100) : 30,
-    // Выбранная модель запоминается для каждого датасета отдельно
-    models: Object.fromEntries(Object.entries(DEFAULT_MODELS).map(([key, m]) => [key, MODELS[saved.models?.[key]] ? saved.models[key] : m])),
+    // Выбранная модель запоминается для каждого датасета отдельно — пока не сменилась модель по умолчанию
+    models: Object.fromEntries(Object.entries(DEFAULT_MODELS).map(([key, m]) => [key,
+      MODELS[saved.models?.[key]] && saved.defaults?.[key] === m ? saved.models[key] : m])),
     selected: indexById.has(saved.selectedId) ? indexById.get(saved.selectedId) : -1,
     hovered: -1,
     theme: saved.theme,
@@ -186,7 +187,8 @@
       }
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
-          dataset: state.dataset, perplexity: state.perplexity, models: state.models, selectedId: PATIENTS.id[state.selected],
+          dataset: state.dataset, perplexity: state.perplexity, models: state.models, defaults: DEFAULT_MODELS,
+          selectedId: PATIENTS.id[state.selected],
           theme: state.theme, lang: I18N.lang, highlightSudden: state.highlightSudden, editsById,
         }));
       } catch (e) { /* хранилище недоступно — состояние живёт только до перезагрузки */ }
@@ -646,6 +648,8 @@
       // Каскад и модель для balanced: вероятность их классификатора
       cur.stage && cur.stage.kind === 'cascade' ? fact(t('fact.cascadeStage', { days: fmtDays(cur.stage.days) }), fmtPct(cur.stage.p), t('fact.cascadeNote')) : null,
       cur.stage && cur.stage.kind === 'balanced' ? fact(t('fact.balStage', { tau: fmtDays(TAU) }), fmtPct(cur.stage.p), t('fact.balNote')) : null,
+      // Конвейер: вероятности трёх групп классификатора и (справочно) время внутри наиболее вероятной группы
+      ...(cur.stage && cur.stage.kind === 'staged' ? stagedFacts(cur.stage, fact) : []),
     ].filter(Boolean));
     // Если наблюдение закончилось до τ без смерти от ССЗ, min(T, τ) неизвестно — есть только нижняя граница
     const subKey = observed(g).exact ? 'hero.sub' : PATIENTS.death_any[g] ? 'hero.subOther' : 'hero.subCensored';
@@ -673,6 +677,26 @@
     renderSurvivalChart(g, base.curve, edited ? cur.curve : null);
     renderModelTable();
     renderMiniSummary();
+  }
+
+  const STAGED_GROUPS = ['early', 'late', 'survive'];
+  function stagedFacts(stage, fact) {
+    const params = { days: fmtDays(stage.days), next: fmtDays(stage.days + 1), last: fmtDays(TAU - 1), tau: fmtDays(TAU) };
+    const probs = STAGED_GROUPS.map((key, k) => `${t(`stg.${key}`, params)} ${fmtPct(stage.P[k])}`).join(' · ');
+    // Кластер всей когорты: признаки, сильнее всего отличающие его пациентов от среднего (↑ — выше, ↓ — ниже);
+    // отличия меньше 0,5σ не показываем — у основного кластера типичных пациентов их нет
+    const distinct = stage.clusterProfile.filter(({ z }) => Math.abs(z) >= 0.5);
+    const profile = distinct.length
+      ? distinct.map(({ feature, z }) => `${I18N.feature(feature).label} ${z > 0 ? '↑' : '↓'}`).join(', ')
+      : t('fact.stgClusterTypical');
+    return [
+      fact(t('fact.stgGroup'), el('span', { class: 'fact-text', text: t(`stg.${STAGED_GROUPS[stage.group]}`, params) }), probs),
+      fact(t('fact.stgCluster'), el('span', { class: 'fact-text', text: profile }), t('fact.stgClusterNote', {
+        c: stage.cluster + 1, k: BUNDLE.models.stg.clusters.n.length, days: params.days,
+        early: fmtDays(stage.clusterEarly), n: fmtDays(stage.clusterN),
+      })),
+      fact(t('fact.stgRoute'), daysTime(stage.routeTime), t('fact.stgRouteNote')),
+    ];
   }
 
   const WINDOW_KEYS = ['w30', 'w90', 'w365', 'w1500', 'wNone'];

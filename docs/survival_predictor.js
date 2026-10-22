@@ -140,6 +140,8 @@
           return twoStage(z).curve;
         case 'bal':
           return balanced(z).curve;
+        case 'stg':
+          return staged(z, xRaw).curve;
         default:
           throw new Error('Unknown model: ' + name);
       }
@@ -158,13 +160,71 @@
       return { curve: Float64Array.from(deathCdf, (F) => 1 - p * F), stage: { kind: 'balanced', p, tau } };
     }
 
+    // Многоэтапный конвейер — как staged_mixture() и staged_route() в scripts/survival_time_predictor.py:
+    // кластер всей когорты — ближайший центроид агломеративной кластеризации; этап 1 — вероятность ранней смерти
+    // (логистическая регрессия по признакам и принадлежности к кластеру), этап 2 — смерти от ССЗ до τ среди
+    // переживших ранний срок (логистическая регрессия), время поздней смерти — модель Кокса при условии смерти до τ.
+    // S(t) = 1 − P[0]·F_ранн(t) − P[1]·F_поздн(t | z); group и routeTime — справочно: группа с наибольшей вероятностью
+    // и медиана времени внутри неё
+    const stg = models.stg;
+    const clusters = stg.clusters;
+    function clusterOf(xRaw) {
+      let best = 0, bestD = Infinity;
+      clusters.centroids.forEach((centroid, c) => {
+        let dist = 0;
+        for (let k = 0; k < d; k++) {
+          const v = (xRaw[columns[k]] - clusters.mean[k]) / clusters.scale[k] - centroid[k];
+          dist += v * v;
+        }
+        if (dist < bestD) { bestD = dist; best = c; }
+      });
+      return best;
+    }
+    // Профиль кластера: признаки, сильнее всего отличающие его пациентов от среднего по когорте (в σ)
+    const clusterProfile = clusters.profile;
+    const stgEarly = Float64Array.from(stg.early_death_days).sort();
+    const stgEarlyCdf = new Float64Array(tau);
+    for (let t = 0; t < tau; t++) stgEarlyCdf[t] = stgEarly.filter((day) => day <= t).length / stgEarly.length;
+    const half = stgEarly.length >> 1;
+    const stgEarlyMedian = Math.trunc(stgEarly.length % 2 ? stgEarly[half] : (stgEarly[half - 1] + stgEarly[half]) / 2);
+    function staged(z, xRaw) {
+      const cluster = clusterOf(xRaw);
+      let s1 = stg.stage1.intercept + stg.stage1.coef[d + cluster];
+      for (let k = 0; k < d; k++) s1 += stg.stage1.coef[k] * z[k];
+      const p1 = sigmoid(s1);
+      let s2 = stg.stage2.intercept;
+      for (let k = 0; k < d; k++) s2 += stg.stage2.coef[k] * z[k];
+      const p2 = sigmoid(s2);
+      const P = [p1, (1 - p1) * p2, (1 - p1) * (1 - p2)];
+      const late = coxSurvival(stg.late, z);
+      const denom = Math.max(1 - late[tau - 1], 1e-12);
+      const curve = new Float64Array(tau);
+      let lateMedian = tau;
+      for (let t = 0; t < tau; t++) {
+        const F = (1 - late[t]) / denom;
+        curve[t] = 1 - P[0] * stgEarlyCdf[t] - P[1] * F;
+        if (lateMedian === tau && F >= 0.5) lateMedian = t;
+      }
+      const group = P.indexOf(Math.max(...P));
+      const routeTime = group === 0 ? stgEarlyMedian : group === 1 ? lateMedian : tau;
+      return {
+        curve,
+        stage: {
+          kind: 'staged', P, group, routeTime, days: stg.early_days, tau,
+          cluster, clusterN: clusters.n[cluster], clusterEarly: clusters.early[cluster],
+          clusterProfile: clusterProfile[cluster],
+        },
+      };
+    }
+
     // Прогноз — как point_prediction() в scripts/survival_time_predictor.py:
     // time — медиана S(t) (первый день, когда S(t) ≤ 0,5, или τ — «смерти от ССЗ в пределах τ не ожидается»);
     // windows — вероятности окон: смерть от ССЗ в первые 30 дней, на 31–90-й, 91–365-й, 366–1499-й день, нет до τ;
     // rmst — ожидаемое число дней без смерти от ССЗ в пределах τ; sTau = S(τ); risk1y — риск смерти от ССЗ за год;
-    // stage — у каскада и модели для balanced: вероятность их классификатора
+    // stage — у каскада, модели для balanced и конвейера: вероятности их классификаторов
+    const SPECIAL = { two: (z) => twoStage(z), bal: (z) => balanced(z), stg: (z, x) => staged(z, x) };
     function predict(xRaw, name) {
-      const special = name === 'two' ? twoStage(scale(xRaw)) : name === 'bal' ? balanced(scale(xRaw)) : null;
+      const special = SPECIAL[name] ? SPECIAL[name](scale(xRaw), xRaw) : null;
       const curve = special ? special.curve : survival(xRaw, name);
       const n = curve.length;
       let rmst = 0, time = n;

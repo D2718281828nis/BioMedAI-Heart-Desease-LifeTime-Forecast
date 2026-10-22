@@ -63,6 +63,7 @@ MODEL_NAMES = {
     'rn': 'RN Survival',
     'two': 'Cascade',
     'bal': 'Balanced mixture',
+    'stg': 'Staged pipeline',
 }
 # Модели ноутбука с калибровкой S(t); 'two' — каскад классификаторов и моделей времени (train_cascade)
 SURVIVAL_MODELS = ['cph', 'aft', 'xgb', 'nn', 'rn']
@@ -84,13 +85,37 @@ EARLY_DAYS = 365
 # df_balanced: S(t) = 1 − p·F(t), F — доля умерших к дню t среди умерших от ССЗ до τ в обучающей выборке; прогноз —
 # медиана S(t). Применять — только к пациентам этой популяции.
 
+# Многоэтапный конвейер для той же популяции (train_staged):
+# 1) вся когорта; 2) без ранних смертей (смерть от ССЗ в первые STAGED_EARLY_DAYS = 10 дней); 3) правило balanced
+# из ноутбука (смерть от ССЗ или наблюдение ≥ τ) — новый balanced без ранних смертей, его обучающие пациенты;
+# классификация в три группы: этап 1 — ранняя смерть или нет, этап 2 — смерть от ССЗ до τ или жизнь дольше τ
+# (логистическая регрессия на новом balanced); 4) модель Кокса на новом balanced — время поздней смерти;
+# 5) S(t) = 1 − p_ранн·F_ранн(t) − p_поздн·F_поздн(t | x), где F_ранн — распределение дней ранней смерти, F_поздн — время
+# смерти по модели Кокса при условии смерти до τ. Прогноз — медиана S(t): вероятности классификатора определяют время
+# каждого пациента. Жёсткая маршрутизация (время группы с наибольшей вероятностью) при кросс-валидации хуже; на странице
+# она показана справочно.
+# Этап 1 использует агломеративную кластеризацию всей когорты: STAGED_CLUSTERS кластеров, связь STAGED_LINKAGE,
+# 28 признаков при поступлении всех 1506 пациентов, без исходов; принадлежность — ближайший центроид. Принадлежность
+# к кластеру (one-hot) входит в логистическую регрессию вместе с признаками пациента. Кластеры — клинические фенотипы:
+# в кластере «анемия, ХБП, ФП, без стентирования» (100 пациентов) и «гипергликемия, диабет, лейкоцитоз» (78) — 10 из
+# 17 смертей от ССЗ в первые 10 дней, в основном кластере (945 пациентов) — 2. При кросс-валидации (5 разбиений ×
+# 5 фолдов, 326 обучающих balanced, 14 ранних смертей) кластеры снижают log-loss этапа 1 в каждом разбиении
+# (на 0,002) и повышают AUC на 0,012–0,024. Перебор: связи ward, average, complete; 4–64 кластера; one-hot или доля
+# ранних смертей в кластере как признак; только кластер или вместе с признаками. Доля ранних смертей в кластере
+# (target encoding) отвергнута: при 14 ранних смертях на 16 кластеров исключение собственного исхода пациента из доли
+# его кластера даёт отрицательный коэффициент и ненадёжный выигрыш. Для этапа 2 кластеры не помогают.
+STAGED_EARLY_DAYS = 10
+STAGED_CLUSTERS = 8
+STAGED_LINKAGE = 'complete'
+STAGED_GROUPS = ('early', 'late', 'survive')
+
 # Внезапная необъяснимая смерть: смерть от ССЗ в первые SUDDEN_MAX_DAY дней, которую не предсказала ни одна модель
 # (у всех прогноз ≥ τ). Для каждого такого пациента — доля переживших тот же срок (первый месяц, три месяца или год)
 # среди SUDDEN_NEIGHBOURS самых похожих по признакам при поступлении пациентов с известным на этот срок исходом
 SUDDEN_MAX_DAY = 365
 SUDDEN_NEIGHBOURS = 50
-# Неожиданное выживание: нет смерти от ССЗ до τ, хотя модель для популяции balanced_dataset.csv оценивала риск
-# смерти от ССЗ до τ не ниже UNEXPECTED_RISK; для сравнения — доля умерших от ССЗ до τ среди SUDDEN_NEIGHBOURS
+# Неожиданное выживание: нет смерти от ССЗ до τ, хотя модель по умолчанию для популяции balanced_dataset.csv
+# (многоэтапный конвейер: 1 − вероятность группы «жив дольше τ») оценивала риск смерти от ССЗ до τ не ниже UNEXPECTED_RISK; для сравнения — доля умерших от ССЗ до τ среди SUDDEN_NEIGHBOURS
 # самых похожих пациентов с известным к τ исходом
 UNEXPECTED_RISK = 0.5
 # Правдоподобные диапазоны значений: вне них — вероятная ошибка ввода (страница предупреждает о таких значениях)
@@ -333,6 +358,112 @@ def library_balanced(bm, X_sc):
 
 
 # ---------------------------------------------------------------------------
+# Многоэтапный конвейер для популяции balanced_dataset.csv
+# ---------------------------------------------------------------------------
+def staged_training_set(full, train_idx):
+    """Шаги 1–3 (см. STAGED_EARLY_DAYS): вся когорта → без ранних смертей → правило balanced из ноутбука → обучающие
+    пациенты. Отложенная выборка не меняется: ранние смерти в ней остаются, их надо прогнозировать."""
+    early = (full['target'] == 1) & (full['time'] <= STAGED_EARLY_DAYS)
+    rest = full[~early]
+    new_balanced = rest[(rest['target'] == 1) | (rest['time'] >= TAU)]
+    return new_balanced.index.intersection(train_idx)
+
+
+def staged_clustering(full, features):
+    """Агломеративная кластеризация всей когорты по признакам при поступлении, без исходов. Принадлежность —
+    ближайший центроид: одна и та же для пациентов датасета и для изменённых на странице."""
+    from sklearn.cluster import AgglomerativeClustering
+    X = full[features].values.astype(float)
+    mean, scale = X.mean(axis=0), X.std(axis=0)
+    Z = (X - mean) / scale
+    labels = AgglomerativeClustering(n_clusters=STAGED_CLUSTERS, linkage=STAGED_LINKAGE).fit_predict(Z)
+    centroids = np.array([Z[labels == c].mean(axis=0) for c in range(STAGED_CLUSTERS)])
+    # Профиль для пояснения: три признака, сильнее всего отличающие пациентов кластера (по ближайшему центроиду)
+    # от среднего по когорте, в σ
+    member = ((Z[:, None, :] - centroids[None]) ** 2).sum(axis=-1).argmin(axis=1)
+    profile = []
+    for c in range(STAGED_CLUSTERS):
+        z = Z[member == c].mean(axis=0)
+        profile.append([{'feature': features[k], 'z': round(float(z[k]), 2)} for k in np.argsort(-np.abs(z))[:3]])
+    return dict(mean=mean, scale=scale, centroids=centroids, profile=profile)
+
+
+def cluster_of(clustering, X_raw):
+    Z = (np.atleast_2d(X_raw) - clustering['mean']) / clustering['scale']
+    return ((Z[:, None, :] - clustering['centroids'][None]) ** 2).sum(axis=-1).argmin(axis=1)
+
+
+def _one_hot(cluster):
+    return np.eye(STAGED_CLUSTERS)[cluster]
+
+
+def train_staged(full, df, features, train_idx, cohort_train_idx, scaler):
+    """Этап 1 — логистическая регрессия «ранняя смерть» по признакам и принадлежности к кластеру всей когорты
+    (обучающие df_balanced); этап 2 — логистическая регрессия «смерть от ССЗ до τ» и модель Кокса времени поздней
+    смерти на новом balanced без ранних смертей."""
+    from lifelines import CoxPHFitter
+    from sklearn.linear_model import LogisticRegression
+
+    clustering = staged_clustering(full, features)
+    # Для пояснения на странице: ранние смерти в кластерах среди всей обучающей когорты с известным статусом на 10-й день
+    t_all = full.loc[cohort_train_idx, 'time'].values.astype(float)
+    early_all = full.loc[cohort_train_idx, 'target'].values.astype(bool) & (t_all <= STAGED_EARLY_DAYS)
+    known = early_all | (t_all > STAGED_EARLY_DAYS)
+    c_all = cluster_of(clustering, full.loc[cohort_train_idx, features].values[known])
+
+    time = df.loc[train_idx, 'time'].values.astype(float)
+    early = df.loc[train_idx, 'target'].values.astype(bool) & (time <= STAGED_EARLY_DAYS)
+    Z = scaler.transform(df.loc[train_idx, features])
+    cluster = cluster_of(clustering, df.loc[train_idx, features].values)
+    stage1 = LogisticRegression(C=0.03, max_iter=5000).fit(np.column_stack([Z, _one_hot(cluster)]), early)
+
+    late_idx = staged_training_set(full, train_idx)
+    Z_late = scaler.transform(full.loc[late_idx, features])
+    time_late = full.loc[late_idx, 'time'].values.astype(float)
+    death_late = full.loc[late_idx, 'target'].values.astype(bool) & (time_late < TAU)
+    stage2 = LogisticRegression(C=0.1, max_iter=5000).fit(Z_late, death_late)
+    # Признак без разброса на новом balanced (бинарный и редкий) модель Кокса не оценивает: его коэффициент — 0
+    varying = [f for f, s in zip(features, Z_late.std(axis=0)) if s > 1e-9]
+    late_data = pd.DataFrame(Z_late, columns=features)[varying].assign(time=time_late, event=death_late.astype(int))
+    late_cox = CoxPHFitter(penalizer=0.1).fit(late_data, duration_col='time', event_col='event')
+    return dict(clustering=clustering, cluster_n=np.bincount(c_all, minlength=STAGED_CLUSTERS),
+                cluster_early=np.bincount(c_all, weights=early_all[known], minlength=STAGED_CLUSTERS).astype(int),
+                stage1=stage1, stage2=stage2, late_cox=late_cox, late_features=varying,
+                early_days=np.sort(time[early]).astype(int))
+
+
+def staged_mixture(p1, p2, early_days, S_late):
+    """S(t) конвейера и вероятности групп (ранняя смерть, смерть от ССЗ до τ после ранней, жизнь дольше τ).
+    S_late — S(t) модели Кокса на новом balanced; F_поздн = (1 − S_late) / (1 − S_late(τ)) — время смерти при условии
+    смерти до τ."""
+    P = np.column_stack([p1, (1 - p1) * p2, (1 - p1) * (1 - p2)])
+    F_early = (np.asarray(early_days)[None, :] <= GRID[:, None]).mean(axis=1)
+    F_late = (1 - S_late) / np.maximum(1 - S_late[:, -1:], 1e-12)
+    return 1 - P[:, :1] * F_early[None, :] - P[:, 1:2] * F_late, P, F_late
+
+
+def staged_route(P, early_days, F_late):
+    """Справочно — жёсткая маршрутизация: группа с наибольшей вероятностью и медиана времени внутри неё
+    (ранняя смерть — медиана дней ранней смерти, поздняя — медиана F_поздн(t | x), жизнь дольше τ — τ)."""
+    group = P.argmax(axis=1)
+    hit = F_late >= 0.5
+    late_median = np.where(hit.any(axis=1), hit.argmax(axis=1), TAU)
+    time = np.select([group == 0, group == 1], [int(np.median(early_days)), late_median], TAU)
+    return group, time
+
+
+def library_staged(st, X_raw, X_sc, features):
+    """(S(t), вероятности групп, F_поздн) средствами scikit-learn и lifelines; X_raw — признаки моделей без
+    стандартизации (для кластера)."""
+    cluster = cluster_of(st['clustering'], X_raw)
+    p1 = st['stage1'].predict_proba(np.column_stack([X_sc, _one_hot(cluster)]))[:, 1]
+    p2 = st['stage2'].predict_proba(X_sc)[:, 1]
+    late = pd.DataFrame(X_sc, columns=features)[st['late_features']]
+    S_late = st['late_cox'].predict_survival_function(late, times=GRID).values.T
+    return staged_mixture(p1, p2, st['early_days'], S_late)
+
+
+# ---------------------------------------------------------------------------
 # Экспорт параметров: всё, что нужно для расчёта S(t) без библиотек (numpy или JavaScript)
 # ---------------------------------------------------------------------------
 def _f32_b64(a):
@@ -381,7 +512,7 @@ def _xgb_leaf_sum(trees, X_sc):
     return out
 
 
-def export_params(df, features, train_idx, m, calibrators, ts, bm):
+def export_params(df, features, train_idx, m, calibrators, ts, bm, st):
     X_train_sc = m['scaler'].transform(df.loc[train_idx, features])
     trees, base_margin = _export_xgb_trees(m['xgb_surv'], X_train_sc)
     nn_weights = m['nn_model'].get_weights()  # W1, b1, W2, b2, W3, b3
@@ -418,8 +549,28 @@ def export_params(df, features, train_idx, m, calibrators, ts, bm):
             'two': _export_cascade(ts, features),
             'bal': {'type': 'balanced_mixture', 'coef': _round(bm['classifier'].coef_[0], 10),
                     'intercept': float(bm['classifier'].intercept_[0]), 'death_days': bm['death_days'].tolist()},
+            'stg': _export_staged(st, features),
         },
     }
+
+
+def _export_staged(st, features):
+    # Модель Кокса поздней смерти — по всем признакам: у не оценённых (без разброса на новом balanced) коэффициент 0
+    late = _export_cox(st['late_cox'], st['late_features'])
+    beta, center = np.zeros(len(features)), np.zeros(len(features))
+    for f, b, c in zip(st['late_features'], late['beta'], late['center']):
+        beta[features.index(f)], center[features.index(f)] = b, c
+    cl = st['clustering']
+    return {'type': 'staged', 'early_days': STAGED_EARLY_DAYS,
+            # кластеры всей когорты: стандартизация, центроиды; ранние смерти и число пациентов в обучающей когорте
+            'clusters': {'mean': _round(cl['mean'], 12), 'scale': _round(cl['scale'], 12),
+                         'centroids': [_round(c, 10) for c in cl['centroids']], 'profile': cl['profile'],
+                         'n': st['cluster_n'].tolist(), 'early': st['cluster_early'].tolist()},
+            # этап 1: коэффициенты признаков, затем — принадлежности к каждому кластеру
+            'stage1': {'coef': _round(st['stage1'].coef_[0], 10), 'intercept': float(st['stage1'].intercept_[0])},
+            'stage2': {'coef': _round(st['stage2'].coef_[0], 10), 'intercept': float(st['stage2'].intercept_[0])},
+            'early_death_days': st['early_days'].tolist(),
+            'late': {'beta': beta.tolist(), 'center': center.tolist(), 'H0': late['H0']}}
 
 
 def _export_cascade(cascade, features):
@@ -498,8 +649,23 @@ class SurvivalTimePredictor:
         margin1 = _xgb_leaf_sum(s1['trees'], X_sc) + s1['bias']
         return cascade_mixture(margin1, s1['platt'], m['early_death_days'], self._cox(m['late'], X_sc))
 
+    def staged(self, X_raw):
+        """Конвейер: (S(t), вероятности групп, F_поздн) — как staged() в docs/survival_predictor.js."""
+        X_sc = self._scale(X_raw)
+        m = self.models['stg']
+        cl = m['clusters']
+        Zc = (np.atleast_2d(np.asarray(X_raw, dtype=float))[:, self._columns] - np.array(cl['mean'])) / np.array(cl['scale'])
+        cluster = ((Zc[:, None, :] - np.array(cl['centroids'])[None]) ** 2).sum(axis=-1).argmin(axis=1)
+        coef1 = np.array(m['stage1']['coef'])
+        d = X_sc.shape[1]
+        p1 = 1 / (1 + np.exp(-(X_sc @ coef1[:d] + coef1[d + cluster] + m['stage1']['intercept'])))
+        p2 = 1 / (1 + np.exp(-(X_sc @ np.array(m['stage2']['coef']) + m['stage2']['intercept'])))
+        return staged_mixture(p1, p2, m['early_death_days'], self._cox(m['late'], X_sc))
+
     def survival(self, X_raw, name):
         """S(t) на сетке 0..τ−1 для исходных (нестандартизованных) признаков, форма (n, τ)."""
+        if name == 'stg':
+            return self.staged(X_raw)[0]
         X_sc = self._scale(X_raw)
         m = self.models[name]
         if name == 'two':
@@ -616,17 +782,25 @@ def cmd_export(args):
     ts = train_cascade(full, mf, train_all, m['scaler'])
     print('Модель для популяции balanced_dataset.csv...')
     bm = train_balanced(df, mf, bal_train, m['scaler'])
+    staged_idx = staged_training_set(full, bal_train)
+    print(f'Многоэтапный конвейер: новый balanced без смертей от ССЗ в первые {STAGED_EARLY_DAYS} дн. — '
+          f'{len(staged_idx)} обучающих пациентов из {len(bal_train)}...')
+    st = train_staged(full, df, mf, bal_train, bal_train.append(cal_train), m['scaler'])
 
     # Эталонный прогноз библиотек — для всех пациентов полного датасета
     X_all_sc = m['scaler'].transform(full[mf])
     reference = library_survival(m, calibrators, X_all_sc, mf)
     reference['two'] = library_cascade(ts, X_all_sc, mf)
-    reference['bal'], p_death_balanced = library_balanced(bm, X_all_sc)
+    reference['bal'], _ = library_balanced(bm, X_all_sc)
+    reference['stg'], staged_P, staged_F_late = library_staged(st, full[mf].values.astype(float), X_all_sc, mf)
+    staged_cluster = cluster_of(st['clustering'], full[mf].values.astype(float))
+    staged_group, staged_time = staged_route(staged_P, st['early_days'], staged_F_late)
     reference_pred = {k: point_prediction(S) for k, S in reference.items()}
     sudden, sudden_horizon, sudden_survived = sudden_unexplained_deaths(full, mf, [p['time'] for p in reference_pred.values()])
-    unexpected, unexpected_died = unexpected_survivals(full, mf, p_death_balanced)
+    p_death_staged = 1 - staged_P[:, 2]
+    unexpected, unexpected_died = unexpected_survivals(full, mf, p_death_staged)
     print(f'Внезапных необъяснимых смертей от ССЗ (≤ {SUDDEN_MAX_DAY} дн., ни одна модель не предсказала): {int(sudden.sum())}; '
-          f'неожиданных выживаний (риск по модели для balanced ≥ {UNEXPECTED_RISK:.0%}): {int(unexpected.sum())}')
+          f'неожиданных выживаний (риск по конвейеру ≥ {UNEXPECTED_RISK:.0%}): {int(unexpected.sum())}')
 
     # Метрики — для каждой популяции на её отложенных пациентах: вся когорта (302, веса IPCW)
     # и balanced_dataset.csv (82 отложенных пациента df_balanced, исход известен у всех)
@@ -671,20 +845,23 @@ def cmd_export(args):
             'sudden': sudden.astype(int).tolist(),
             'sudden_horizon': sudden_horizon.tolist(),
             'sudden_survived': _round(sudden_survived, 3),
-            # Неожиданное выживание: признак, риск смерти от ССЗ до τ по модели для balanced, доля умерших среди похожих
+            # Неожиданное выживание: признак, риск смерти от ССЗ до τ по конвейеру, доля умерших среди похожих
             'unexpected': unexpected.astype(int).tolist(),
-            'unexpected_risk': _round(np.where(unexpected, p_death_balanced, 0), 3),
+            'unexpected_risk': _round(np.where(unexpected, p_death_staged, 0), 3),
             'unexpected_died': _round(unexpected_died, 3),
         },
         'datasets': {
             'balanced': {'file': BALANCED_CSV.name, 'rows': full.index.get_indexer(df.index).tolist()},
             'full': {'file': FULL_XLSX.name, 'rows': None},
         },
-        **export_params(df, mf, bal_train, m, calibrators, ts, bm),
+        **export_params(df, mf, bal_train, m, calibrators, ts, bm, st),
         'metrics': metrics,
         # Прогноз по самим библиотекам — эталон для проверки JavaScript-расчёта (scripts/check_js_predictor.js)
         'reference_rmst': {k: _round(S.sum(axis=1), 9) for k, S in reference.items()},
         'reference_time': {k: p['time'].tolist() for k, p in reference_pred.items()},
+        # Конвейер: вероятности групп и жёсткая маршрутизация (справочно) — для той же проверки
+        'reference_staged': {'P': [_round(row, 9) for row in staged_P], 'group': staged_group.tolist(),
+                             'time': staged_time.astype(int).tolist(), 'cluster': staged_cluster.tolist()},
     }
 
     # Проверка: расчёт по экспортированным параметрам совпадает с библиотеками
@@ -728,12 +905,12 @@ def sudden_unexplained_deaths(full, model_feature_names, predicted_times):
     return sudden, horizon, survived
 
 
-def unexpected_survivals(full, model_feature_names, p_death_balanced):
+def unexpected_survivals(full, model_feature_names, p_death):
     """Неожиданное выживание (см. UNEXPECTED_RISK): признак группы и доля умерших от ССЗ до τ среди самых похожих
     при поступлении пациентов с известным к τ исходом."""
     time = full['time'].values
     event = full['target'].values.astype(bool)
-    group = (time >= TAU) & ~(event & (time < TAU)) & (p_death_balanced >= UNEXPECTED_RISK)
+    group = (time >= TAU) & ~(event & (time < TAU)) & (p_death >= UNEXPECTED_RISK)
     X = full[model_feature_names].values
     Z = (X - X.mean(axis=0)) / X.std(axis=0)
     known = (event & (time < TAU)) | (time >= TAU)
@@ -788,6 +965,14 @@ def cmd_predict(args):
         w = edit['windows'][0]
         print(f'{title:<19} {show(base["time"][0]):>9} {show(edit["time"][0]):>8} {w[0]:>7.1%} {w[1]:>6.1%} {w[2]:>7.1%} '
               f'{w[3]:>9.1%} {w[4]:>11.1%} {edit["rmst"][0]:>8.0f}')
+    if 'stg' in names:
+        m = predictor.models['stg']
+        _, P, F_late = predictor.staged(x_edit)
+        group, route_time = staged_route(P, m['early_death_days'], F_late)
+        labels = [f'ранняя смерть ≤ {STAGED_EARLY_DAYS} дн.', f'смерть от ССЗ на {STAGED_EARLY_DAYS + 1}–{TAU - 1}-й день',
+                  f'жив дольше {TAU} дн.']
+        print(f'Конвейер: {"; ".join(f"{l} {p:.1%}" for l, p in zip(labels, P[0]))}')
+        print(f'  наиболее вероятная группа — {labels[group[0]]}; время внутри неё (справочно): {show(route_time[0])} дн.')
 
 
 def main():
