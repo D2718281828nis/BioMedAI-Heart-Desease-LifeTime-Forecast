@@ -149,9 +149,14 @@
   .dot.t0 { background: var(--t0); }
   .dot.t1 { background: var(--t1); }
   .diamond { width: 8px; height: 8px; background: var(--t1); border: 1.5px solid var(--ink); transform: rotate(45deg); display: inline-block; margin: 0 2px; flex: none; }
-  .sudden-key { cursor: pointer; white-space: normal; flex-wrap: wrap; }
-  .sudden-key input { margin: 0 0 0 4px; accent-color: var(--ink); }
+  .diamond.t0 { background: var(--t0); }
+  .diamond.t1 { background: var(--t1); }
+  .marked-key { white-space: normal; }
+  .highlight-key { cursor: pointer; }
+  .highlight-key input { margin: 0; accent-color: var(--ink); }
   .callout { margin-top: 14px; padding: 10px 12px; border-left: 3px solid var(--t1); background: var(--wash); border-radius: 6px; font-size: 13px; color: var(--ink-2); }
+  .callout.survivor { border-left-color: var(--t0); }
+  .callout.quality { border-left-color: var(--ink-2); }
   .callout b { display: flex; align-items: center; gap: 8px; color: var(--ink); margin-bottom: 2px; }
   .tt-note { max-width: 300px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--grid); color: var(--ink-2); display: flex; gap: 8px; align-items: baseline; }
   .ring { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--ink); display: inline-block; }
@@ -187,6 +192,25 @@
   .facts dt { color: var(--ink-2); font-size: 12.5px; }
   .facts dd { margin: 0; font-size: 20px; font-weight: 600; }
   .facts small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
+
+  /* Вероятности окон времени смерти от ССЗ */
+  .risk-profile { display: grid; gap: 6px; margin-top: 16px; }
+  .profile-title { color: var(--ink-2); font-size: 13px; }
+  .profile-row {
+    display: grid; grid-template-columns: minmax(0, 13em) minmax(80px, 1fr) 4em minmax(0, 11em);
+    grid-template-areas: "label track value note"; align-items: center; gap: 2px 12px; font-size: 13px;
+  }
+  .profile-label { grid-area: label; color: var(--ink-2); }
+  .profile-track { grid-area: track; position: relative; height: 10px; background: var(--wash); border-radius: 4px; }
+  .profile-bar { position: absolute; left: 0; top: 0; bottom: 0; min-width: 2px; border-radius: 0 4px 4px 0; }
+  .profile-bar.t0 { background: var(--t0); }
+  .profile-bar.t1 { background: var(--t1); }
+  .profile-cohort { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--ink); border-radius: 1px; }
+  .profile-row b { grid-area: value; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .profile-row small { grid-area: note; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  @media (max-width: 640px) {
+    .profile-row { grid-template-columns: minmax(0, 1fr) 4em; grid-template-areas: "label value" "track track" "note note"; }
+  }
 
   .chart { position: relative; margin-top: 16px; }
   .chart svg { display: block; width: 100%; height: 250px; overflow: visible; }
@@ -256,6 +280,8 @@
   .param.unused .param-name label { color: var(--ink-2); font-weight: 450; }
   .param-orig { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .param.edited .param-orig { color: var(--ink-2); }
+  .param.implausible { border-left-color: var(--ink-2); }
+  .param.implausible .param-orig { color: var(--ink); white-space: normal; text-align: right; }
   .param input[type="range"] { grid-area: range; width: 100%; }
   .param input[type="number"] { grid-area: num; width: 100%; text-align: right; }
   .param .reset { grid-area: reset; width: 30px; height: 28px; padding: 0; color: var(--ink-2); }
@@ -274,7 +300,6 @@
   .patients tbody tr:hover { background: var(--wash); }
   .patients tbody tr.active { background: var(--wash); box-shadow: inset 3px 0 0 var(--ink); }
   .outcome { display: inline-flex; align-items: center; gap: 6px; }
-  .patients td.low-conf { color: var(--muted); }
 
   .method { color: var(--ink-2); }
   .method ul { margin: 8px 0 0; padding-left: 18px; }
@@ -333,8 +358,9 @@
           <span class="key"><span class="dot t0"></span><span id="legend-t0"></span></span>
           <span class="key"><span class="ring"></span><span data-i18n="legend.selected"></span></span>
           <span class="key"><span class="edit-key"><i></i><b></b><em></em></span><span data-i18n="legend.edited"></span></span>
-          <label class="key sudden-key"><span class="diamond"></span><span id="legend-sudden"></span>
-            <input type="checkbox" id="highlight-sudden"><span data-i18n="sudden.highlight"></span></label>
+          <span class="key marked-key"><span class="diamond t1"></span><span id="legend-sudden"></span></span>
+          <span class="key marked-key"><span class="diamond t0"></span><span id="legend-unexpected"></span></span>
+          <label class="key highlight-key"><input type="checkbox" id="highlight-sudden"><span data-i18n="sudden.highlight"></span></label>
         </div>
       </div>
       <div class="map-wrap" id="map-wrap">
@@ -361,7 +387,9 @@
         </div>
         <dl class="facts" id="facts"></dl>
       </div>
+      <div class="risk-profile" id="risk-profile"></div>
       <div class="callout" id="sudden-note" hidden></div>
+      <div class="callout quality" id="quality-note" hidden></div>
       <div class="chart" id="survival-chart"></div>
       <div class="chart-legend" id="survival-legend"></div>
       <p class="chart-note" data-i18n-html="chart.note"></p>
@@ -371,10 +399,10 @@
             <tr>
               <th scope="col" data-i18n="models.model"></th>
               <th scope="col" data-i18n="models.cindex"></th>
+              <th scope="col" data-i18n="models.auc30"></th>
+              <th scope="col" data-i18n="models.auc365"></th>
+              <th scope="col" data-i18n="models.ibs"></th>
               <th scope="col" data-i18n="models.mae"></th>
-              <th scope="col" data-i18n="models.within"></th>
-              <th scope="col" data-i18n="models.over1000"></th>
-              <th scope="col" data-i18n="models.brier"></th>
               <th scope="col" data-i18n="models.base"></th>
               <th scope="col" data-i18n="models.edit"></th>
             </tr>
