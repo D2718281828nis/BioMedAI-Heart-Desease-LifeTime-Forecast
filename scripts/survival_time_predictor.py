@@ -53,19 +53,27 @@ MODEL_NAMES = {
     'xgb': 'XGBoost Cox',
     'nn': 'NN Survival',
     'rn': 'RN Survival',
-    'two': 'Two-stage',
+    'two': 'Cascade',
 }
-# Модели ноутбука с калибровкой S(t); 'two' — двухэтапный алгоритм (train_two_stage)
+# Модели ноутбука с калибровкой S(t); 'two' — каскад классификаторов и моделей времени (train_cascade)
 SURVIVAL_MODELS = ['cph', 'aft', 'xgb', 'nn', 'rn']
 
-# Двухэтапный алгоритм: этап 1 — классификатор «смерть от ССЗ в первые EARLY_DAYS дней», этап 2 — отдельные модели
-# времени для групп. Настройки выбраны кросс-валидацией только на обучающей выборке: E из {90, 180, 365} дней,
-# классификатор (логистическая регрессия или XGBoost; 30 исходных признаков или вместе с конструированными —
-# приближённая шкала GRACE, shock index, eGFR CKD-EPI, флаги шока, ФВ < 40%, анемии, гипергликемии, лейкоцитоза,
-# возраста ≥ 75), модель времени ранней смерти (медиана или Weibull AFT по признакам) и порог 0,3–0,7.
-# Лучшим оказался XGBoost по исходным признакам с медианой; конструированные признаки точность не повысили.
+# Каскад: этап 1 — классификатор «смерть от ССЗ в первые EARLY_DAYS дней» (группа ранней смерти, прогноз EARLY_TIME);
+# этап 2 — классификатор «смерть от ССЗ между EARLY_DAYS и τ» для остальных (прогноз MID_TIME); этап 3 — модель
+# Кокса, обученная на проживших дольше EARLY_DAYS, для всех прочих (медиана её S(t)). Классификаторы отмечают
+# заданную долю обучающих пациентов с наибольшей оценкой риска.
+# Все настройки выбраны кросс-валидацией только на обучающей выборке. Перебирались: E из {90, 180, 365} дней;
+# логистическая регрессия, XGBoost (глубина 1–3, 150–600 деревьев), CatBoost, случайный лес, риск по модели Кокса
+# и их ансамбли; 30 исходных признаков или вместе с конструированными (приближённая шкала GRACE, shock index,
+# eGFR CKD-EPI, флаги шока, ФВ < 40%, анемии, гипергликемии, лейкоцитоза, возраста ≥ 75); доля отмечаемых 0,5–5%;
+# день прогноза ранней смерти 53–175; второй классификатор (доля 1–3%, день 600–1200). Ни ансамбли, ни
+# конструированные признаки точность не повысили. Выигрыш ограничен точностью (precision) классификаторов: для
+# смерти в первые 90 дней среди отмеченных умирают рано лишь 17–33%, для первого года — 60–67% у верхних 1–2%.
 EARLY_DAYS = 365
-EARLY_THRESHOLD = 0.4
+STAGE1_SHARE = 0.03   # доля пациентов, относимых к группе ранней смерти
+EARLY_TIME = 150      # прогноз для неё: окно ±150 дней покрывает смерти с 0-го по 300-й день
+MID_SHARE = 0.01      # доля пациентов, относимых к группе смерти между EARLY_DAYS и τ
+MID_TIME = 900
 # Роль пациента в обучении (patients.split в docs/survival_model.js)
 SPLIT_CALIBRATION, SPLIT_TRAIN, SPLIT_TEST = 0, 1, 2
 SPLIT_NAMES = {SPLIT_CALIBRATION: 'обучающая выборка (только калибровка: цензурирован до τ)',
@@ -223,61 +231,87 @@ def library_survival(m, calibrators, X_sc, features):
 # ---------------------------------------------------------------------------
 # Двухэтапный алгоритм
 # ---------------------------------------------------------------------------
-def train_two_stage(full, features, train_idx, scaler):
-    """Этап 1: XGBoost-классификатор «смерть от ССЗ в первые EARLY_DAYS дней» по 30 стандартизованным признакам;
-    обучается на пациентах с известным статусом на EARLY_DAYS (цензурированные раньше не входят), вероятность
-    калибруется по Платту на оценках вне выборки (5 фолдов). Этап 2: для группы ранней смерти прогноз — медиана дня
-    смерти у ранних смертей обучающей выборки; для остальных — новая модель Кокса, обученная на пациентах, проживших
-    дольше EARLY_DAYS, прогноз — медиана её S(t)."""
+def train_cascade(full, features, train_idx, scaler):
+    """Каскад (см. константы EARLY_DAYS…MID_TIME). Классификаторы обучаются на пациентах с известной меткой
+    (цензурированные до горизонта метки не входят); их вероятности калибруются по Платту на оценках вне выборки
+    (5 фолдов) — по ним строится смесь распределений для уверенности и функции выживаемости."""
     from lifelines import CoxPHFitter
     from sklearn.linear_model import LogisticRegression
     from sklearn.model_selection import StratifiedKFold
     from xgboost import XGBClassifier
 
+    def xgb():
+        return XGBClassifier(n_estimators=600, learning_rate=0.03, max_depth=1, subsample=0.8, colsample_bynode=0.8,
+                             min_child_weight=1, random_state=42, eval_metric='logloss')
+
+    def platt(score_fn, Z, y):
+        """Калибровка по Платту на оценках вне выборки: score_fn(Z_train, y_train, Z_val) → оценки."""
+        oof = np.zeros(len(y))
+        for fold_train, fold_val in StratifiedKFold(5, shuffle=True, random_state=0).split(Z, y):
+            oof[fold_val] = score_fn(Z[fold_train], y[fold_train], Z[fold_val])
+        model = LogisticRegression(C=1e6).fit(oof[:, None], y)
+        return float(model.coef_[0, 0]), float(model.intercept_[0])
+
     time = full.loc[train_idx, 'time'].values.astype(float)
     event = full.loc[train_idx, 'target'].values.astype(bool)
     Z = scaler.transform(full.loc[train_idx, features])
-    label = np.where(event & (time <= EARLY_DAYS), 1, np.where(time > EARLY_DAYS, 0, -1))
-    known = label >= 0
 
-    def make_classifier():
-        return XGBClassifier(n_estimators=300, learning_rate=0.03, max_depth=2, subsample=0.8, colsample_bynode=0.8,
-                             min_child_weight=2, random_state=42, eval_metric='logloss')
-    classifier = make_classifier().fit(Z[known], label[known])
-    margin_oof = np.zeros(known.sum())
-    for fold_train, fold_val in StratifiedKFold(5, shuffle=True, random_state=0).split(Z[known], label[known]):
-        fold = make_classifier().fit(Z[known][fold_train], label[known][fold_train])
-        margin_oof[fold_val] = fold.predict(Z[known][fold_val], output_margin=True)
-    platt = LogisticRegression(C=1e6).fit(margin_oof[:, None], label[known])
+    # Этап 1: смерть от ССЗ в первые EARLY_DAYS дней
+    y1 = np.where(event & (time <= EARLY_DAYS), 1, np.where(time > EARLY_DAYS, 0, -1))
+    k1 = y1 >= 0
+    stage1 = xgb().fit(Z[k1], y1[k1])
+    margin1 = stage1.predict(Z, output_margin=True)
+    a1, b1 = platt(lambda Za, ya, Zb: xgb().fit(Za, ya).predict(Zb, output_margin=True), Z[k1], y1[k1])
 
-    early_days = np.sort(time[label == 1]).astype(int)
+    # Этап 2: смерть от ССЗ между EARLY_DAYS и τ у проживших дольше EARLY_DAYS — ансамбль XGBoost и логистической
+    # регрессии: среднее их маржей, стандартизованных по обучающим пациентам
+    y2 = np.where(time <= EARLY_DAYS, -1, np.where(event & (time < TAU), 1, np.where(time >= TAU, 0, -1)))
+    k2 = y2 >= 0
+
+    def stage2_fit(Za, ya):
+        x, l = xgb().fit(Za, ya), LogisticRegression(C=1.0, max_iter=5000).fit(Za, ya)
+        mx, ml = x.predict(Za, output_margin=True), l.decision_function(Za)
+        return x, l, (mx.mean(), mx.std(), ml.mean(), ml.std())
+
+    def stage2_score(x, l, norm, Zb):
+        return ((x.predict(Zb, output_margin=True) - norm[0]) / norm[1] + (l.decision_function(Zb) - norm[2]) / norm[3]) / 2
+
+    xgb2, lr2, norm2 = stage2_fit(Z[k2], y2[k2])
+    score2 = stage2_score(xgb2, lr2, norm2, Z)
+    a2, b2 = platt(lambda Za, ya, Zb: stage2_score(*stage2_fit(Za, ya), Zb), Z[k2], y2[k2])
+
+    # Этап 3: модель Кокса на проживших дольше EARLY_DAYS
     late = time > EARLY_DAYS
     late_data = pd.DataFrame(Z[late], columns=features).assign(time=time[late], event=event[late].astype(int))
     late_cox = CoxPHFitter(penalizer=0.1).fit(late_data, duration_col='time', event_col='event')
-    return dict(classifier=classifier, platt_a=float(platt.coef_[0, 0]), platt_b=float(platt.intercept_[0]),
-                early_days=early_days, early_time=int(round(np.median(early_days))), late_cox=late_cox,
-                Z_known=Z[known])
+
+    return dict(stage1=stage1, platt1=(a1, b1), threshold1=float(np.quantile(margin1, 1 - STAGE1_SHARE)),
+                xgb2=xgb2, lr2=lr2, norm2=norm2, platt2=(a2, b2), threshold2=float(np.quantile(score2, 1 - MID_SHARE)),
+                early_days=np.sort(time[y1 == 1]).astype(int), late_cox=late_cox, Z_known1=Z[k1], Z_known2=Z[k2])
 
 
-def two_stage_mixture(margin, platt_a, platt_b, early_days, S_late, early_time):
-    """Прогноз двухэтапного алгоритма по марже классификатора и S(t) модели «остальных».
-    Время: медиана дня ранней смерти, если вероятность классификатора ≥ EARLY_THRESHOLD, иначе медиана S_late.
-    Функция выживаемости — смесь p·S_early + (1 − p)·S_late с откалиброванной вероятностью p; по ней считаются
-    уверенность, RMST и риск — так же, как у остальных моделей."""
-    p_raw = 1 / (1 + np.exp(-margin))
-    p_cal = 1 / (1 + np.exp(-(platt_a * margin + platt_b)))
-    S_early = (np.asarray(early_days)[None, :] > GRID[:, None]).mean(axis=1)   # P(T > t | ранняя смерть)
+def cascade_mixture(margin1, score2, params, S_late):
+    """Прогноз каскада. Время: EARLY_TIME для группы ранней смерти (маржа этапа 1 ≥ порога), MID_TIME для группы
+    этапа 2, иначе медиана S(t) модели Кокса этапа 3. Функция выживаемости — смесь p·S_early + (1 − p)·S_late,
+    где p — откалиброванная вероятность ранней смерти, S_early — распределение дней ранней смерти в обучающей
+    выборке; по ней считаются уверенность, RMST и риск, как у остальных моделей."""
+    (a1, b1), early_days = params['platt1'], np.asarray(params['early_days'])
+    p_early = 1 / (1 + np.exp(-(a1 * margin1 + b1)))
+    S_early = (early_days[None, :] > GRID[:, None]).mean(axis=1)
     below = S_late <= 0.5
     late_time = np.where(below.any(axis=1), below.argmax(axis=1), TAU)
-    time = np.where(p_raw >= EARLY_THRESHOLD, early_time, late_time)
-    return p_cal[:, None] * S_early[None, :] + (1 - p_cal[:, None]) * S_late, time
+    time = np.where(margin1 >= params['threshold1'], EARLY_TIME,
+                    np.where(score2 >= params['threshold2'], MID_TIME, late_time))
+    return p_early[:, None] * S_early[None, :] + (1 - p_early[:, None]) * S_late, time
 
 
-def library_two_stage(ts, X_sc, features):
-    """Двухэтапный прогноз средствами самих библиотек (xgboost, lifelines): (S(t), время)."""
-    S_late = ts['late_cox'].predict_survival_function(pd.DataFrame(X_sc, columns=features), times=GRID).values.T
-    return two_stage_mixture(ts['classifier'].predict(X_sc, output_margin=True), ts['platt_a'], ts['platt_b'],
-                             ts['early_days'], S_late, ts['early_time'])
+def library_cascade(cascade, X_sc, features):
+    """Прогноз каскада средствами самих библиотек (xgboost, scikit-learn, lifelines): (S(t), время)."""
+    S_late = cascade['late_cox'].predict_survival_function(pd.DataFrame(X_sc, columns=features), times=GRID).values.T
+    norm = cascade['norm2']
+    score2 = ((cascade['xgb2'].predict(X_sc, output_margin=True) - norm[0]) / norm[1]
+              + (cascade['lr2'].decision_function(X_sc) - norm[2]) / norm[3]) / 2
+    return cascade_mixture(cascade['stage1'].predict(X_sc, output_margin=True), score2, cascade, S_late)
 
 
 # ---------------------------------------------------------------------------
@@ -363,18 +397,24 @@ def export_params(df, features, train_idx, m, calibrators, ts):
                    'W_in': _f32_b64(m['W_in']), 'coef': _f32_b64(m['rn_readout'].coef_[0]),
                    'intercept': float(m['rn_readout'].intercept_[0]),
                    'calibrator': _export_cox(calibrators['rn'], ['score'])},
-            'two': _export_two_stage(ts, features),
+            'two': _export_cascade(ts, features),
         },
     }
 
 
-def _export_two_stage(ts, features):
-    trees, base_margin = _export_xgb_trees(ts['classifier'], ts['Z_known'])
-    return {'type': 'two_stage', 'early_days': EARLY_DAYS, 'threshold': EARLY_THRESHOLD,
-            'classifier': {'trees': trees, 'bias': float(base_margin)},
-            'platt': {'a': ts['platt_a'], 'b': ts['platt_b']},
-            'early_death_days': ts['early_days'].tolist(), 'early_time': ts['early_time'],
-            'late': _export_cox(ts['late_cox'], features)}
+def _export_cascade(cascade, features):
+    trees1, bias1 = _export_xgb_trees(cascade['stage1'], cascade['Z_known1'])
+    trees2, bias2 = _export_xgb_trees(cascade['xgb2'], cascade['Z_known2'])
+    norm = cascade['norm2']
+    return {'type': 'cascade', 'early_days': EARLY_DAYS, 'early_time': EARLY_TIME, 'mid_time': MID_TIME,
+            'stage1': {'trees': trees1, 'bias': float(bias1), 'threshold': cascade['threshold1'],
+                       'platt': list(cascade['platt1'])},
+            'stage2': {'xgb': {'trees': trees2, 'bias': float(bias2), 'mean': float(norm[0]), 'sd': float(norm[1])},
+                       'lr': {'coef': _round(cascade['lr2'].coef_[0], 10), 'intercept': float(cascade['lr2'].intercept_[0]),
+                              'mean': float(norm[2]), 'sd': float(norm[3])},
+                       'threshold': cascade['threshold2'], 'platt': list(cascade['platt2'])},
+            'early_death_days': cascade['early_days'].tolist(),
+            'late': _export_cox(cascade['late_cox'], features)}
 
 
 # ---------------------------------------------------------------------------
@@ -430,9 +470,14 @@ class SurvivalTimePredictor:
 
     def _two_stage(self, X_sc):
         m = self.models['two']
-        margin = _xgb_leaf_sum(m['classifier']['trees'], X_sc) + m['classifier']['bias']
-        return two_stage_mixture(margin, m['platt']['a'], m['platt']['b'], m['early_death_days'],
-                                 self._cox(m['late'], X_sc), m['early_time'])
+        s1, s2 = m['stage1'], m['stage2']
+        margin1 = _xgb_leaf_sum(s1['trees'], X_sc) + s1['bias']
+        mx = _xgb_leaf_sum(s2['xgb']['trees'], X_sc) + s2['xgb']['bias']
+        ml = X_sc @ np.array(s2['lr']['coef']) + s2['lr']['intercept']
+        score2 = ((mx - s2['xgb']['mean']) / s2['xgb']['sd'] + (ml - s2['lr']['mean']) / s2['lr']['sd']) / 2
+        params = {'platt1': s1['platt'], 'early_days': m['early_death_days'],
+                  'threshold1': s1['threshold'], 'threshold2': s2['threshold']}
+        return cascade_mixture(margin1, score2, params, self._cox(m['late'], X_sc))
 
     def survival(self, X_raw, name):
         """S(t) на сетке 0..τ−1 для исходных (нестандартизованных) признаков, форма (n, τ)."""
@@ -535,13 +580,13 @@ def cmd_export(args):
     calibrators = recalibrate(full, df, features, bal_train, cal_train, m)
 
     train_all = bal_train.append(cal_train)
-    print(f'Двухэтапный алгоритм: классификатор смерти от ССЗ ≤ {EARLY_DAYS} дн. и две модели времени...')
-    ts = train_two_stage(full, features, train_all, m['scaler'])
+    print(f'Каскад: классификаторы смерти от ССЗ ≤ {EARLY_DAYS} дн. и {EARLY_DAYS}–{TAU} дн., модель Кокса...')
+    ts = train_cascade(full, features, train_all, m['scaler'])
 
     # Эталонный прогноз библиотек — для всех пациентов полного датасета
     X_all_sc = m['scaler'].transform(full[features])
     reference = library_survival(m, calibrators, X_all_sc, features)
-    reference['two'], two_time = library_two_stage(ts, X_all_sc, features)
+    reference['two'], two_time = library_cascade(ts, X_all_sc, features)
     reference_pred = {k: point_prediction(S, two_time if k == 'two' else None) for k, S in reference.items()}
     test_pos = full.index.get_indexer(test_idx)
     metrics = test_metrics({k: S[test_pos] for k, S in reference.items()},

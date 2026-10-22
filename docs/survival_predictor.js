@@ -58,25 +58,40 @@
     const trees = prepareTrees(models.xgb.trees);
     const sigmoid = (v) => 1 / (1 + Math.exp(-v));
 
-    // Двухэтапный алгоритм — как two_stage_mixture() в scripts/survival_time_predictor.py:
-    // этап 1 — классификатор смерти от ССЗ в первые early_days дней (деревья XGBoost, вероятность по Платту);
-    // этап 2 — медиана дня ранней смерти либо медиана S(t) модели Кокса, обученной на проживших дольше early_days.
-    // S(t) — смесь p·S_early + (1 − p)·S_late, по ней считаются уверенность, RMST и риск
-    const two = models.two;
-    const twoTrees = prepareTrees(two.classifier.trees);
+    // Каскад — как cascade_mixture() в scripts/survival_time_predictor.py:
+    // этап 1 — классификатор смерти от ССЗ в первые early_days дней (деревья XGBoost) → прогноз early_time;
+    // этап 2 — классификатор смерти от ССЗ между early_days и τ (XGBoost + логистическая регрессия) → mid_time;
+    // этап 3 — медиана S(t) модели Кокса, обученной на проживших дольше early_days.
+    // S(t) — смесь p·S_early + (1 − p)·S_late (p — вероятность ранней смерти по Платту); по ней считаются
+    // уверенность, RMST и риск
+    const cascade = models.two;
+    const s1 = cascade.stage1, s2 = cascade.stage2;
+    const stage1Trees = prepareTrees(s1.trees), stage2Trees = prepareTrees(s2.xgb.trees);
+    const platt = (p, score) => sigmoid(p[0] * score + p[1]);
     const sEarly = new Float64Array(tau);
-    for (let t = 0; t < tau; t++) sEarly[t] = two.early_death_days.filter((d) => d > t).length / two.early_death_days.length;
+    for (let t = 0; t < tau; t++) sEarly[t] = cascade.early_death_days.filter((d) => d > t).length / cascade.early_death_days.length;
     function twoStage(z) {
-      const margin = treeSum(twoTrees, z) + two.classifier.bias;
-      const score = sigmoid(margin);
-      const pEarly = sigmoid(two.platt.a * margin + two.platt.b);
-      const late = coxSurvival(two.late, z);
+      const margin1 = treeSum(stage1Trees, z) + s1.bias;
+      let ml = s2.lr.intercept;
+      for (let k = 0; k < d; k++) ml += s2.lr.coef[k] * z[k];
+      const score2 = ((treeSum(stage2Trees, z) + s2.xgb.bias - s2.xgb.mean) / s2.xgb.sd + (ml - s2.lr.mean) / s2.lr.sd) / 2;
+      const pEarly = platt(s1.platt, margin1);
+      const late = coxSurvival(cascade.late, z);
       let lateTime = tau;
       for (let t = 0; t < tau; t++) if (late[t] <= 0.5) { lateTime = t; break; }
       const curve = new Float64Array(tau);
       for (let t = 0; t < tau; t++) curve[t] = pEarly * sEarly[t] + (1 - pEarly) * late[t];
-      const early = score >= two.threshold;
-      return { curve, time: early ? two.early_time : lateTime, stage: { early, score, threshold: two.threshold, days: two.early_days } };
+      const group = margin1 >= s1.threshold ? 'early' : score2 >= s2.threshold ? 'mid' : 'late';
+      return {
+        curve,
+        time: group === 'early' ? cascade.early_time : group === 'mid' ? cascade.mid_time : lateTime,
+        stage: {
+          group, days: cascade.early_days, tau,
+          // Вероятности по Платту и пороги в тех же единицах — для показа в карточке пациента
+          pEarly, thresholdEarly: platt(s1.platt, s1.threshold),
+          pMid: platt(s2.platt, score2), thresholdMid: platt(s2.platt, s2.threshold),
+        },
+      };
     }
     const nnLayers = models.nn.layers.map((l) => ({ ...l, W: decodeF32(l.W), b: decodeF32(l.b) }));
     const rn = models.rn;

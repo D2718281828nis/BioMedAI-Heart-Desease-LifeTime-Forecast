@@ -563,9 +563,13 @@
       fact(t('fact.rmst'), days(cur.rmst), datasetOr(days, base.rmst, t('fact.rmstNote'))),
       fact(t('fact.alive'), I18N.fixed(cur.sTau, 2),
         datasetOr((v) => I18N.fixed(v, 2), base.sTau, t('fact.aliveNote', { tau: fmtDays(TAU) }))),
-      // Двухэтапный алгоритм: в какую группу этап 1 отнёс пациента
-      cur.stage ? fact(t('fact.stage'), t(cur.stage.early ? 'fact.stageEarly' : 'fact.stageLate'),
-        t('fact.stageNote', { p: fmtPct(cur.stage.score), thr: fmtPct(cur.stage.threshold), days: fmtDays(cur.stage.days) })) : null,
+      // Каскад: в какую группу классификаторы отнесли пациента
+      cur.stage ? fact(t('fact.stage'), t(`fact.stage.${cur.stage.group}`, { days: fmtDays(cur.stage.days), tau: fmtDays(cur.stage.tau) }),
+        t('fact.stageNote', {
+          days: fmtDays(cur.stage.days), tau: fmtDays(cur.stage.tau),
+          p1: fmtPct(cur.stage.pEarly), t1: fmtPct(cur.stage.thresholdEarly),
+          p2: fmtPct(cur.stage.pMid), t2: fmtPct(cur.stage.thresholdMid),
+        })) : null,
     ].filter(Boolean));
     // Если наблюдение закончилось до τ без смерти от ССЗ, min(T, τ) неизвестно — есть только нижняя граница
     const subKey = observed(g).exact ? 'hero.sub' : PATIENTS.death_any[g] ? 'hero.subOther' : 'hero.subCensored';
