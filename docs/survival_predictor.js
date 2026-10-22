@@ -1,10 +1,10 @@
 /*
  * Прогноз времени дожития по подходу Survival-function-analysys.ipynb — в браузере.
  *
- * Параметры моделей (CoxPH, Weibull AFT, XGBoost Cox, NN и RN с калибровкой Кокса) экспортирует
- * scripts/survival_time_predictor.py в docs/survival_model.js. Формулы те же, что в классе
- * SurvivalTimePredictor этого скрипта; совпадение с lifelines / xgboost / keras проверяет
- * scripts/check_js_predictor.js.
+ * Параметры моделей (CoxPH, Weibull AFT, XGBoost Cox, NN и RN) вместе с калибраторами S(t), обученными
+ * на всей когорте с учётом цензурирования, экспортирует scripts/survival_time_predictor.py
+ * в docs/survival_model.js. Формулы те же, что в классе SurvivalTimePredictor этого скрипта;
+ * совпадение с lifelines / xgboost / keras проверяет scripts/check_js_predictor.js.
  *
  * Для пациента считается функция выживаемости S(t) на дневной сетке 0..τ−1 и прогноз времени
  * RMST(τ) = Σ S(t) — ожидаемое число дней жизни в пределах горизонта τ.
@@ -67,28 +67,30 @@
       return sum;
     }
 
-    function nnProbability(z) {
+    // Логит нейросети (последний слой без сигмоиды) — оценка риска для калибратора
+    function nnLogit(z) {
       let h = z;
       for (const l of nnLayers) {
         const out = new Float64Array(l.out);
         for (let j = 0; j < l.out; j++) {
           let s = l.b[j];
           for (let i = 0; i < l.in; i++) s += h[i] * l.W[i * l.out + j];
-          out[j] = l.activation === 'relu' ? Math.max(s, 0) : 1 / (1 + Math.exp(-s));
+          out[j] = l.activation === 'relu' ? Math.max(s, 0) : l.activation === 'sigmoid' ? 1 / (1 + Math.exp(-s)) : s;
         }
         h = out;
       }
       return h[0];
     }
 
-    function rnProbability(z) {
+    // Логит резервуарной сети: tanh(z · W_in) · coef + intercept
+    function rnLogit(z) {
       let s = rn.intercept;
       for (let j = 0; j < rn.n_reservoir; j++) {
         let a = 0;
         for (let i = 0; i < rn.n_features; i++) a += z[i] * rnW[i * rn.n_reservoir + j];
         s += Math.tanh(a) * rnCoef[j];
       }
-      return 1 / (1 + Math.exp(-s));
+      return s;
     }
 
     // S(t) на сетке 0..τ−1 для исходных (нестандартизованных) признаков
@@ -109,15 +111,16 @@
         case 'xgb':
           return coxSurvival(m.calibrator, [xgbLogRisk(z)]);
         case 'nn':
-          return coxSurvival(m.calibrator, [nnProbability(z)]);
+          return coxSurvival(m.calibrator, [nnLogit(z)]);
         case 'rn':
-          return coxSurvival(m.calibrator, [rnProbability(z)]);
+          return coxSurvival(m.calibrator, [rnLogit(z)]);
         default:
           throw new Error('Unknown model: ' + name);
       }
     }
 
-    // Прогноз времени: RMST(τ), вероятность дожить до τ и медиана дожития (null, если S(t) > 0.5 на всём горизонте)
+    // Прогноз времени: RMST(τ), вероятность не умереть от ССЗ до τ, медиана дожития (null, если S(t) > 0.5
+    // на всём горизонте) и риск смерти от ССЗ в течение года
     function predict(xRaw, name) {
       const curve = survival(xRaw, name);
       let rmst = 0, median = null;
@@ -125,7 +128,7 @@
         rmst += curve[t];
         if (median === null && curve[t] <= 0.5) median = t;
       }
-      return { curve, rmst, sTau: curve[curve.length - 1], median };
+      return { curve, rmst, sTau: curve[curve.length - 1], median, risk1y: 1 - curve[365] };
     }
 
     return { features, tau, modelNames: bundle.meta.model_names, scale, survival, predict };

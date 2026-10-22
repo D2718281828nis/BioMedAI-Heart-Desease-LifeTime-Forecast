@@ -18,7 +18,7 @@
   const TAU = BUNDLE.meta.tau;
   const MODELS = BUNDLE.meta.model_names;
   const MODEL_KEYS = Object.keys(MODELS);
-  const DEFAULT_MODEL = 'xgb';
+  const DEFAULT_MODEL = 'cph'; // лучший C-index и Brier на отложенной выборке
   const DEFAULT_DATASET = 'balanced';
   const STORAGE_KEY = 'survival-explorer:v1';
   const ITERATIONS = 1000;
@@ -58,10 +58,25 @@
     crea: { step: 1, group: 'labs' },
   };
   const GROUPS = ['demo', 'vitals', 'comorb', 'event', 'treat', 'labs'];
-  const SPLIT_KEYS = ['patient.excluded', 'patient.train', 'patient.test'];
+  // patients.split: 0 — только калибровка S(t), 1 — обучение моделей и калибровка, 2 — отложенная выборка
+  const SPLIT_KEYS = ['patient.calib', 'patient.train', 'patient.test'];
 
   const { t } = I18N;
-  const outcome = (target) => t(`outcome.${target}`);
+  // Исход: смерть от ССЗ (target = 1), смерть от других причин (для смерти от ССЗ — цензурирование) или жив
+  const outcomeKey = (g) => (PATIENTS.target[g] ? 'cvd' : PATIENTS.death_any[g] ? 'other' : 'alive');
+  const outcome = (g) => t(`outcome.${outcomeKey(g)}`);
+
+  // Фактическое min(T, τ), с которым сравнивается прогноз RMST: точно — у умерших от ССЗ и наблюдавшихся
+  // не меньше τ; если наблюдение закончилось раньше без смерти от ССЗ — известна только нижняя граница
+  function observed(g) {
+    const time = PATIENTS.time[g];
+    return PATIENTS.target[g] || time >= TAU ? { value: Math.min(time, TAU), exact: true } : { value: time, exact: false };
+  }
+  // |прогноз − факт|; при нижней границе — наименьшая возможная ошибка (0, если прогноз не меньше границы)
+  function predictionError(g, predicted) {
+    const o = observed(g);
+    return o.exact ? Math.abs(predicted - o.value) : Math.max(0, o.value - predicted);
+  }
 
   // ---------------------------------------------------------------------------
   // Вспомогательные функции
@@ -94,6 +109,8 @@
   const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
   const fmtDays = (v) => I18N.int(v);
   const days = (v) => t('days', { n: fmtDays(v) });
+  const fmtObserved = (g) => (observed(g).exact ? '' : '≥ ') + fmtDays(observed(g).value);
+  const fmtError = (g, predicted) => (observed(g).exact ? '' : '≥ ') + fmtDays(predictionError(g, predicted));
   // Значение для поля ввода — всегда с точкой; для подписей — I18N.num по правилам языка
   const fmtValue = (v) => String(+(+v).toFixed(4));
   const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -439,15 +456,15 @@
     const m = state.model;
     const rows = [
       [days(PATIENTS.time[g]), t('tt.time')],
-      [outcome(PATIENTS.target[g]), t('tt.outcome', { t: PATIENTS.target[g] })],
+      [outcome(g), t('tt.outcome', { t: PATIENTS.target[g] })],
+      [t('days', { n: fmtObserved(g) }), t('tt.real')],
       [days(baseTime[m][g]), t('tt.pred', { model: MODELS[m] })],
     ];
     if (editedSet.has(g)) rows.push([days(curTime[m][g]), t('tt.predEdit')]);
-    const split = PATIENTS.split[g];
     tooltip.replaceChildren(
       el('div', { class: 'tt-title' },
         el('span', { class: `dot t${PATIENTS.target[g]}` }),
-        t('tt.title', { id: PATIENTS.id[g], row: ds.local[g] }) + (split === 2 ? t('tt.heldOut') : split === 0 ? t('tt.excluded') : '')),
+        t('tt.title', { id: PATIENTS.id[g], row: ds.local[g] }) + (PATIENTS.split[g] === 2 ? t('tt.heldOut') : '')),
       ...rows.map(([value, label]) => el('div', { class: 'tt-row' }, el('b', { text: value }), el('span', { text: label }))),
     );
     tooltip.style.display = 'block';
@@ -522,17 +539,19 @@
     const median = (p) => (p.median === null ? t('fact.beyond', { tau: fmtDays(TAU) }) : days(p.median));
     const fact = (term, value, note) => el('div', {}, el('dt', { text: term }), el('dd', {}, value, el('small', { text: note })));
     $('facts').replaceChildren(
-      fact(t('fact.time'), days(time), t('fact.outcome', { outcome: outcome(target), t: target })),
+      fact(t('fact.time'), days(time), t('fact.outcome', { outcome: outcome(g), t: target })),
+      fact(t('fact.risk'), I18N.pct(cur.risk1y),
+        edited ? t('fact.datasetValue', { v: I18N.pct(base.risk1y) }) : t('fact.cohort', { v: I18N.pct(BUNDLE.meta.cohort_risk_1y) })),
       fact(t('fact.alive'), I18N.fixed(cur.sTau, 2),
         edited ? t('fact.datasetValue', { v: I18N.fixed(base.sTau, 2) }) : t('fact.aliveNote', { tau: fmtDays(TAU) })),
       fact(t('fact.median'), median(cur),
         edited ? t('fact.datasetValue', { v: median(base) }) : t('fact.medianNote', { half: I18N.fixed(0.5, 1) })),
     );
-    // У цензурированного до τ пациента min(T, τ) неизвестно — есть только нижняя граница
-    const censoredEarly = target === 0 && time < TAU;
-    $('hero-sub').textContent = t(censoredEarly ? 'hero.subCensored' : 'hero.sub', { tau: fmtDays(TAU), v: fmtDays(Math.min(time, TAU)) });
+    // Если наблюдение закончилось до τ без смерти от ССЗ, min(T, τ) неизвестно — есть только нижняя граница
+    const subKey = observed(g).exact ? 'hero.sub' : PATIENTS.death_any[g] ? 'hero.subOther' : 'hero.subCensored';
+    $('hero-sub').textContent = t(subKey, { tau: fmtDays(TAU), v: fmtDays(Math.min(time, TAU)) });
 
-    renderSurvivalChart(base.curve, edited ? cur.curve : null, time, target);
+    renderSurvivalChart(g, base.curve, edited ? cur.curve : null);
     renderModelTable();
     renderMiniSummary();
   }
@@ -547,6 +566,7 @@
         el('td', {}, el('label', {}, radio, MODELS[m])),
         el('td', { text: I18N.fixed(BUNDLE.metrics[m].c_index, 3) }),
         el('td', { text: I18N.fixed(BUNDLE.metrics[m].brier_s_tau, 3) }),
+        el('td', { text: fmtDays(BUNDLE.metrics[m].calibration_rmst) }),
         el('td', { text: t('days.short', { n: fmtDays(baseTime[m][g]) }) }),
         el('td', { text: edited ? t('days.short', { n: fmtDays(curTime[m][g]) }) : '—' }));
       tr.addEventListener('click', (e) => { if (e.target !== radio) setModel(m); });
@@ -568,15 +588,15 @@
 
   // Функция выживаемости S(t): по значениям датасета и (если есть) с изменениями
   let chartData = null;
-  function renderSurvivalChart(baseCurve, editCurve, time, target) {
-    chartData = { baseCurve, editCurve, time, target };
+  function renderSurvivalChart(g, baseCurve, editCurve) {
+    chartData = { g, baseCurve, editCurve, time: PATIENTS.time[g], target: PATIENTS.target[g] };
     drawSurvivalChart();
   }
 
   function drawSurvivalChart() {
     const host = $('survival-chart');
     if (!chartData) return;
-    const { baseCurve, editCurve, time, target } = chartData;
+    const { g, baseCurve, editCurve, time, target } = chartData;
     const W = host.clientWidth || 600, H = 250;
     const m = { l: 40, r: 14, t: 24, b: 30 };
     const x = (day) => m.l + (day / TAU) * (W - m.l - m.r);
@@ -613,7 +633,7 @@
       root.append(svg('line', { class: 'event-line', x1: x(time), x2: x(time), y1: y(1), y2: y(0) }));
       const right = x(time) < W * 0.6;
       root.append(svg('text', { class: 'event-label', x: x(time) + (right ? 6 : -6), y: labelY, 'text-anchor': right ? 'start' : 'end',
-        text: t(target ? 'chart.deathBefore' : 'chart.censoredBefore', { d: fmtDays(time) }) }));
+        text: t(target ? 'chart.deathBefore' : PATIENTS.death_any[g] ? 'chart.otherBefore' : 'chart.censoredBefore', { d: fmtDays(time) }) }));
     } else {
       root.append(svg('text', { class: 'event-label', x: W - m.r - 4, y: labelY, 'text-anchor': 'end',
         text: t(target ? 'chart.deathAfter' : 'chart.aliveAfter', { d: fmtDays(time) }) }));
@@ -781,7 +801,7 @@
     resetBtn.addEventListener('click', () => resetPatient(g));
     $('patient-badges').replaceChildren(...[
       el('span', { class: 'badge' }, el('span', { class: `dot t${PATIENTS.target[g]}` }),
-        t('fact.outcome', { outcome: outcome(PATIENTS.target[g]), t: PATIENTS.target[g] })),
+        t('fact.outcome', { outcome: outcome(g), t: PATIENTS.target[g] })),
       el('span', { class: 'badge', text: t(SPLIT_KEYS[PATIENTS.split[g]]) }),
       nEdited ? el('span', { class: 'badge' }, el('span', { class: 'ring-sm' }), t('patient.edited', { n: nEdited })) : null,
       resetBtn,
@@ -798,7 +818,9 @@
     ['id', 'table.id', (g) => PATIENTS.id[g]],
     ['target', 'table.outcome', (g) => PATIENTS.target[g]],
     ['time', 'table.time', (g) => PATIENTS.time[g]],
+    ['real', 'table.real', (g) => observed(g).value],
     ['pred', 'table.pred', (g) => baseTime[state.model][g]],
+    ['error', 'table.error', (g) => predictionError(g, baseTime[state.model][g])],
     ['edited', 'table.edit', (g) => (editedSet.has(g) ? curTime[state.model][g] : -1)],
   ];
 
@@ -835,9 +857,11 @@
     tableRows[i].replaceChildren(
       el('td', { text: i }),
       el('td', { text: PATIENTS.id[g] }),
-      el('td', {}, el('span', { class: 'outcome' }, el('span', { class: `dot t${PATIENTS.target[g]}` }), outcome(PATIENTS.target[g]))),
+      el('td', {}, el('span', { class: 'outcome' }, el('span', { class: `dot t${PATIENTS.target[g]}` }), outcome(g))),
       el('td', { text: fmtDays(PATIENTS.time[g]) }),
+      el('td', { text: fmtObserved(g) }),
       el('td', { text: fmtDays(baseTime[m][g]) }),
+      el('td', { text: fmtError(g, baseTime[m][g]) }),
       el('td', { text: editedSet.has(g) ? fmtDays(curTime[m][g]) : '—' }),
     );
   }
