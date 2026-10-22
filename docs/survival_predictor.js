@@ -36,7 +36,10 @@
   function createPredictor(bundle) {
     const { features, scaler, models } = bundle;
     const tau = bundle.meta.tau;
-    const d = features.length;
+    // Модели используют только признаки, известные при поступлении (model_features); на вход подаются все признаки
+    const modelFeatures = bundle.model_features || features;
+    const columns = modelFeatures.map((f) => features.indexOf(f));
+    const d = modelFeatures.length;
 
     // Пороги и листья XGBoost хранятся как float32: сравнение признака с порогом тоже во float32, как в xgboost
     const prepareTrees = (list) => list.map((t) => ({
@@ -100,7 +103,7 @@
 
     function scale(xRaw) {
       const z = new Float64Array(d);
-      for (let k = 0; k < d; k++) z[k] = (xRaw[k] - scaler.mean[k]) / scaler.scale[k];
+      for (let k = 0; k < d; k++) z[k] = (xRaw[columns[k]] - scaler.mean[k]) / scaler.scale[k];
       return z;
     }
 
@@ -182,7 +185,7 @@
       return { curve, time, confidence, rmst, sTau: curve[n - 1], risk1y: 1 - curve[365], stage: two ? two.stage : null };
     }
 
-    return { features, tau, tolerance, modelNames: bundle.meta.model_names, scale, survival, predict };
+    return { features, modelFeatures, tau, tolerance, modelNames: bundle.meta.model_names, scale, survival, predict };
   }
 
   return { createPredictor };

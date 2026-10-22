@@ -247,6 +247,7 @@
   .param-name label { font-weight: 550; }
   .param-name code { color: var(--muted); font-size: 11px; margin-left: 4px; }
   .param-enc { color: var(--muted); font-size: 12px; }
+  .param.unused .param-name label { color: var(--ink-2); font-weight: 450; }
   .param-orig { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .param.edited .param-orig { color: var(--ink-2); }
   .param input[type="range"] { grid-area: range; width: 100%; }
@@ -408,7 +409,7 @@
     <section class="card method" id="method-card" aria-labelledby="method-title">
       <h2 id="method-title" data-i18n="method.title"></h2>
       <ul data-i18n-html="method.list"></ul>
-      <pre><code>python scripts/survival_time_predictor.py predict --id 1444 --set age=70 llo=1</code></pre>
+      <pre><code>python scripts/survival_time_predictor.py predict --id 1444 --set age=70 ef_hosp=35</code></pre>
     </section>
   </main>
 

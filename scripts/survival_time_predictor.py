@@ -4,7 +4,13 @@
 с тем же разбиением df_balanced (= balanced_dataset.csv), стандартизацией и гиперпараметрами. Для пациента
 считается функция выживаемости S(t) на сетке 0..τ−1 и прогноз времени RMST(τ) = ∫₀^τ S(t) dt.
 
-Исправление по сравнению с ноутбуком. df_balanced — это смерти от ССЗ и пациенты, наблюдавшиеся не меньше τ;
+Исправления по сравнению с ноутбуком.
+
+1. Признаки doctor (наблюдающий врач) и llo (льготное лекарственное обеспечение) назначаются после выписки:
+умершие рано их не получают (92% и 100% умерших от ССЗ в первые 30 дней), то есть в них частично заложен исход
+(immortal time bias). Модели используют только 28 признаков, известных при поступлении (MODEL_FEATURES).
+
+2. df_balanced — это смерти от ССЗ и пациенты, наблюдавшиеся не меньше τ;
 1098 пациентов, цензурированных раньше τ, в него не входят. Поэтому доля смертей в нём 37% вместо 10%,
 и функции выживаемости, оценённые на нём, сильно занижены: средний прогноз S(τ) 0,63–0,72 против 0,88
 по Каплану — Мейеру на отложенных пациентах. Модели по-прежнему обучаются на df_balanced (там у всех известен
@@ -21,7 +27,7 @@
 Примеры:
   python scripts/survival_time_predictor.py export
   python scripts/survival_time_predictor.py predict --id 1444
-  python scripts/survival_time_predictor.py predict --row 0 --set age=70 llo=1
+  python scripts/survival_time_predictor.py predict --row 0 --set age=70 ef_hosp=35
   python scripts/survival_time_predictor.py predict --row 5 --dataset full
 """
 
@@ -66,14 +72,19 @@ SURVIVAL_MODELS = ['cph', 'aft', 'xgb', 'nn', 'rn']
 # логистическая регрессия, XGBoost (глубина 1–3, 150–600 деревьев), CatBoost, случайный лес, риск по модели Кокса
 # и их ансамбли; 30 исходных признаков или вместе с конструированными (приближённая шкала GRACE, shock index,
 # eGFR CKD-EPI, флаги шока, ФВ < 40%, анемии, гипергликемии, лейкоцитоза, возраста ≥ 75); доля отмечаемых 0,5–5%;
-# день прогноза ранней смерти 53–175; второй классификатор (доля 1–3%, день 600–1200). Ни ансамбли, ни
-# конструированные признаки точность не повысили. Выигрыш ограничен точностью (precision) классификаторов: для
-# смерти в первые 90 дней среди отмеченных умирают рано лишь 17–33%, для первого года — 60–67% у верхних 1–2%.
+# день прогноза ранней смерти 53–175; второй классификатор (доля 1–3%, день 600–1200); также kNN (разные
+# масштабирования, NCA, веса важности, координаты t-SNE), SVM, MLP, LDA/QDA, наивный Байес и агломеративная
+# кластеризация (ward/average/complete, 5–150 кластеров) как классификатор. Ни один вариант не превзошёл XGBoost.
+# Выигрыш ограничен точностью (precision) классификаторов: для смерти в первые 90 дней среди отмеченных умирают
+# рано лишь 17–33%, для первого года — около половины у верхних 1–2%. Доля отмечаемых выбрана заново для признаков
+# при поступлении (без doctor и llo).
 EARLY_DAYS = 365
-STAGE1_SHARE = 0.03   # доля пациентов, относимых к группе ранней смерти
+STAGE1_SHARE = 0.02   # доля пациентов, относимых к группе ранней смерти
 EARLY_TIME = 150      # прогноз для неё: окно ±150 дней покрывает смерти с 0-го по 300-й день
 MID_SHARE = 0.01      # доля пациентов, относимых к группе смерти между EARLY_DAYS и τ
 MID_TIME = 900
+# Признаки, известные только после выписки: в моделях не используются (см. docstring)
+POST_DISCHARGE = ('doctor', 'llo')
 # Роль пациента в обучении (patients.split в docs/survival_model.js)
 SPLIT_CALIBRATION, SPLIT_TRAIN, SPLIT_TEST = 0, 1, 2
 SPLIT_NAMES = {SPLIT_CALIBRATION: 'обучающая выборка (только калибровка: цензурирован до τ)',
@@ -95,6 +106,11 @@ def load_full_dataset(path=FULL_XLSX):
     data.drop(columns=['result_cvd'], inplace=True)
     features = [c for c in data.columns if c not in ('time', 'target')]
     return data, features, death_any
+
+
+def model_features(features):
+    """Признаки моделей: все, кроме известных только после выписки."""
+    return [f for f in features if f not in POST_DISCHARGE]
 
 
 def balanced_subset(full, check_csv=BALANCED_CSV):
@@ -429,6 +445,8 @@ class SurvivalTimePredictor:
     def __init__(self, bundle):
         self.bundle = bundle
         self.features = bundle['features']
+        self.model_features = bundle.get('model_features', self.features)
+        self._columns = [self.features.index(f) for f in self.model_features]
         self.tau = bundle['meta']['tau']
         self.mean = np.array(bundle['scaler']['mean'])
         self.scale = np.array(bundle['scaler']['scale'])
@@ -468,6 +486,10 @@ class SurvivalTimePredictor:
             return (np.tanh(X_sc @ self._rn_W) @ self._rn_coef + m['intercept'])[:, None]
         raise ValueError(name)
 
+    def _scale(self, X_raw):
+        """Стандартизация признаков моделей; X_raw — все признаки пациента в порядке self.features."""
+        return (np.atleast_2d(np.asarray(X_raw, dtype=float))[:, self._columns] - self.mean) / self.scale
+
     def _two_stage(self, X_sc):
         m = self.models['two']
         s1, s2 = m['stage1'], m['stage2']
@@ -481,7 +503,7 @@ class SurvivalTimePredictor:
 
     def survival(self, X_raw, name):
         """S(t) на сетке 0..τ−1 для исходных (нестандартизованных) признаков, форма (n, τ)."""
-        X_sc = (np.atleast_2d(np.asarray(X_raw, dtype=float)) - self.mean) / self.scale
+        X_sc = self._scale(X_raw)
         m = self.models[name]
         if name == 'two':
             return self._two_stage(X_sc)[0]
@@ -494,7 +516,7 @@ class SurvivalTimePredictor:
 
     def predict(self, X_raw, name):
         if name == 'two':
-            X_sc = (np.atleast_2d(np.asarray(X_raw, dtype=float)) - self.mean) / self.scale
+            X_sc = self._scale(X_raw)
             return point_prediction(*self._two_stage(X_sc))
         return point_prediction(self.survival(X_raw, name))
 
@@ -572,21 +594,23 @@ def test_metrics(curves, time_obs, event_obs, time_train, event_train, times=Non
 def cmd_export(args):
     from lifelines import KaplanMeierFitter
     full, features, death_any = load_full_dataset(args.xlsx)
+    mf = model_features(features)
     df = balanced_subset(full)
     bal_train, cal_train, test_idx = split_cohort(full, df)
-    print(f'Обучаем модели ноутбука на df_balanced ({len(bal_train)} пациентов)...')
-    m = train_models(df, features, bal_train)
+    print(f'Обучаем модели ноутбука на df_balanced ({len(bal_train)} пациентов, {len(mf)} признаков при поступлении; '
+          f'без {", ".join(POST_DISCHARGE)})...')
+    m = train_models(df, mf, bal_train)
     print(f'Калибруем S(t) на всей обучающей когорте ({len(bal_train) + len(cal_train)} пациентов)...')
-    calibrators = recalibrate(full, df, features, bal_train, cal_train, m)
+    calibrators = recalibrate(full, df, mf, bal_train, cal_train, m)
 
     train_all = bal_train.append(cal_train)
     print(f'Каскад: классификаторы смерти от ССЗ ≤ {EARLY_DAYS} дн. и {EARLY_DAYS}–{TAU} дн., модель Кокса...')
-    ts = train_cascade(full, features, train_all, m['scaler'])
+    ts = train_cascade(full, mf, train_all, m['scaler'])
 
     # Эталонный прогноз библиотек — для всех пациентов полного датасета
-    X_all_sc = m['scaler'].transform(full[features])
-    reference = library_survival(m, calibrators, X_all_sc, features)
-    reference['two'], two_time = library_cascade(ts, X_all_sc, features)
+    X_all_sc = m['scaler'].transform(full[mf])
+    reference = library_survival(m, calibrators, X_all_sc, mf)
+    reference['two'], two_time = library_cascade(ts, X_all_sc, mf)
     reference_pred = {k: point_prediction(S, two_time if k == 'two' else None) for k, S in reference.items()}
     test_pos = full.index.get_indexer(test_idx)
     metrics = test_metrics({k: S[test_pos] for k, S in reference.items()},
@@ -608,6 +632,7 @@ def cmd_export(args):
                  'cohort_s_tau': float(cohort_km.survival_function_at_times(TAU - 1).iloc[0]),
                  'test_size': len(test_idx), 'test_km_s_tau': km_s_tau},
         'features': features,
+        'model_features': mf,  # признаки моделей — без известных только после выписки
         'columns': full.columns.tolist(),  # порядок столбцов датасетов — для выгрузки изменённого датасета
         'patients': {
             'id': full.index.tolist(),
@@ -621,7 +646,7 @@ def cmd_export(args):
             'balanced': {'file': BALANCED_CSV.name, 'rows': full.index.get_indexer(df.index).tolist()},
             'full': {'file': FULL_XLSX.name, 'rows': None},
         },
-        **export_params(df, features, bal_train, m, calibrators, ts),
+        **export_params(df, mf, bal_train, m, calibrators, ts),
         'metrics': metrics,
         # Прогноз по самим библиотекам — эталон для проверки JavaScript-расчёта (scripts/check_js_predictor.js)
         'reference_rmst': {k: _round(S.sum(axis=1), 9) for k, S in reference.items()},
@@ -679,7 +704,8 @@ def cmd_predict(args):
     print(f'Пациент ID {p["id"][row]}: {outcome_text(target, p["death_any"][row], time)}; {SPLIT_NAMES[p["split"][row]]}')
     print(f'Факт min(T, τ) = {real} дн.')
     for i in np.flatnonzero(x_edit != x):
-        print(f'  {predictor.features[i]}: {x[i]:g} → {x_edit[i]:g}')
+        unused = '' if predictor.features[i] in predictor.model_features else ' (моделями не используется: известен после выписки)'
+        print(f'  {predictor.features[i]}: {x[i]:g} → {x_edit[i]:g}{unused}')
     names = MODEL_NAMES if args.model == 'all' else {args.model: MODEL_NAMES[args.model]}
     print(f'{"модель":<12} {"прогноз, дни":>13} {"с изменениями":>14} {f"P(|ош.| ≤ {TOLERANCE})":>16} '
           f'{"RMST(τ)":>8} {"S(τ)":>6} {"риск 1 год":>11}')

@@ -18,7 +18,9 @@
   const TAU = BUNDLE.meta.tau;
   const MODELS = BUNDLE.meta.model_names;
   const MODEL_KEYS = Object.keys(MODELS);
-  const DEFAULT_MODEL = 'cph'; // лучший C-index и Brier на отложенной выборке
+  const DEFAULT_MODEL = 'two'; // каскад: наименьшая ошибка прогноза времени при кросс-валидации и на отложенной выборке
+  // Признаки, которые модели не используют (известны только после выписки)
+  const MODEL_FEATURES = new Set(BUNDLE.model_features || BUNDLE.features);
   const DEFAULT_DATASET = 'balanced';
   const STORAGE_KEY = 'survival-explorer:v1';
   const ITERATIONS = 1000;
@@ -760,11 +762,12 @@
         const num = el('input', { type: 'number', step: 'any', id: `num-${f}`, inputmode: 'decimal' });
         const reset = el('button', { class: 'reset', type: 'button', 'aria-label': t('param.reset', { label: text.label }), title: t('param.resetTitle'), text: '↺' });
         const orig = el('span', { class: 'param-orig' });
-        const row = el('div', { class: 'param' },
+        const used = MODEL_FEATURES.has(f);
+        const row = el('div', { class: used ? 'param' : 'param unused' },
           el('div', { class: 'param-head' },
             el('span', { class: 'param-name' },
               el('label', { for: `num-${f}`, text: text.label }), el('code', { text: f }),
-              el('span', { class: 'param-enc', text: ` · ${encoding(text)}` })),
+              el('span', { class: 'param-enc', text: ` · ${encoding(text)}${used ? '' : ` · ${t('param.notUsed')}`}` })),
             orig),
           range, num, reset);
 
