@@ -95,6 +95,12 @@ MID_TIME = 900
 # промежуточная зона с прогнозом модели Кокса. Применять — только к пациентам этой популяции.
 BALANCED_THRESHOLD = 0.6
 BALANCED_DEATH_TIME = 150
+
+# Внезапная необъяснимая смерть: смерть от ССЗ в первые SUDDEN_MAX_DAY дней, которую не предсказала ни одна модель
+# (у всех прогноз ≥ τ). Для каждого такого пациента — доля переживших тот же срок (первый месяц, три месяца или год)
+# среди SUDDEN_NEIGHBOURS самых похожих по признакам при поступлении пациентов с известным на этот срок исходом
+SUDDEN_MAX_DAY = 365
+SUDDEN_NEIGHBOURS = 50
 # Признаки, известные только после выписки: в моделях не используются (см. docstring)
 POST_DISCHARGE = ('doctor', 'llo')
 # Роль пациента в обучении (patients.split в docs/survival_model.js)
@@ -664,6 +670,8 @@ def cmd_export(args):
     reference['bal'], bal_time = library_balanced(bm, X_all_sc)
     times = {'two': two_time, 'bal': bal_time}
     reference_pred = {k: point_prediction(S, times.get(k)) for k, S in reference.items()}
+    sudden, sudden_horizon, sudden_survived = sudden_unexplained_deaths(full, mf, [p['time'] for p in reference_pred.values()])
+    print(f'Внезапных необъяснимых смертей от ССЗ (≤ {SUDDEN_MAX_DAY} дн., ни одна модель не предсказала): {int(sudden.sum())}')
 
     # Метрики — для каждой популяции на её отложенных пациентах: вся когорта (302, веса IPCW)
     # и balanced_dataset.csv (82 отложенных пациента df_balanced, исход известен у всех)
@@ -689,7 +697,8 @@ def cmd_export(args):
                  # Каплан — Мейер по всей когорте: средний риск — для сравнения с прогнозом пациента
                  'cohort_risk_1y': float(1 - cohort_km.survival_function_at_times(365).iloc[0]),
                  'cohort_s_tau': float(cohort_km.survival_function_at_times(TAU - 1).iloc[0]),
-                 'test_size': {'full': len(test_idx), 'balanced': len(bal_test)}, 'test_km_s_tau': km_s_tau},
+                 'test_size': {'full': len(test_idx), 'balanced': len(bal_test)}, 'test_km_s_tau': km_s_tau,
+                 'sudden_max_day': SUDDEN_MAX_DAY, 'sudden_neighbours': SUDDEN_NEIGHBOURS},
         'features': features,
         'model_features': mf,  # признаки моделей — без известных только после выписки
         'columns': full.columns.tolist(),  # порядок столбцов датасетов — для выгрузки изменённого датасета
@@ -700,6 +709,10 @@ def cmd_export(args):
             'death_any': death_any.astype(int).tolist(),
             'split': split.tolist(),  # 0 — только калибровка, 1 — обучение моделей и калибровка, 2 — отложенная выборка
             'X': [_round(row, 10) for row in full[features].values],
+            # Внезапная необъяснимая смерть: признак, срок сравнения, доля переживших его среди похожих пациентов
+            'sudden': sudden.astype(int).tolist(),
+            'sudden_horizon': sudden_horizon.tolist(),
+            'sudden_survived': _round(sudden_survived, 3),
         },
         'datasets': {
             'balanced': {'file': BALANCED_CSV.name, 'rows': full.index.get_indexer(df.index).tolist()},
@@ -732,6 +745,26 @@ def cmd_export(args):
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(JS_PREFIX + json.dumps(bundle, ensure_ascii=False, separators=(',', ':')) + ';\n', encoding='utf-8')
     print(f'Записано: {out.relative_to(ROOT) if out.is_relative_to(ROOT) else out} ({os.path.getsize(out) / 1024:.0f} КБ)')
+
+
+def sudden_unexplained_deaths(full, model_feature_names, predicted_times):
+    """Внезапные необъяснимые смерти (см. SUDDEN_MAX_DAY). Возвращает массивы по пациентам: признак группы,
+    срок сравнения (30, 90 или 365 дней) и долю переживших его среди самых похожих пациентов."""
+    time = full['time'].values
+    event = full['target'].values.astype(bool)
+    missed = np.all([t >= TAU for t in predicted_times], axis=0)
+    sudden = event & (time <= SUDDEN_MAX_DAY) & missed
+    X = full[model_feature_names].values
+    Z = (X - X.mean(axis=0)) / X.std(axis=0)
+    horizon = np.zeros(len(time), dtype=int)
+    survived = np.zeros(len(time))
+    for g in np.flatnonzero(sudden):
+        h = 30 if time[g] <= 30 else 90 if time[g] <= 90 else 365
+        known = np.flatnonzero(((event & (time <= h)) | (time > h)) & (np.arange(len(time)) != g))
+        nearest = known[np.argsort(((Z[known] - Z[g]) ** 2).sum(axis=1))[:SUDDEN_NEIGHBOURS]]
+        horizon[g] = h
+        survived[g] = 1 - (event[nearest] & (time[nearest] <= h)).mean()
+    return sudden, horizon, survived
 
 
 def outcome_text(target, death_any, time):

@@ -114,8 +114,19 @@
   const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
   const fmtDays = (v) => I18N.int(v);
   const days = (v) => t('days', { n: fmtDays(v) });
-  const fmtObserved = (g) => (observed(g).exact ? '' : '≥ ') + fmtDays(observed(g).value);
-  const fmtError = (g, predicted) => (observed(g).exact ? '' : '≥ ') + fmtDays(predictionError(g, predicted));
+  // Прогноз τ означает «смерти от ССЗ в пределах горизонта τ не будет» — показываем «≥ τ», а не точный день;
+  // так же показываем факт у пациентов, наблюдавшихся дольше τ без смерти от ССЗ (их время — не день смерти)
+  const fmtTime = (v) => (v >= TAU ? `≥ ${fmtDays(TAU)}` : fmtDays(v));
+  const daysTime = (v) => t('days', { n: fmtTime(v) });
+  const fmtObserved = (g) => {
+    const o = observed(g);
+    return o.exact ? fmtTime(o.value) : `≥ ${fmtDays(o.value)}`;
+  };
+  // |ошибка|; ✓ — известная ошибка не больше допуска
+  const fmtError = (g, predicted) => {
+    const o = observed(g), e = predictionError(g, predicted);
+    return o.exact ? `${fmtDays(e)}${e <= TOLERANCE ? ' ✓' : ''}` : `≥ ${fmtDays(e)}`;
+  };
   // Значение для поля ввода — всегда с точкой; для подписей — I18N.num по правилам языка
   const fmtValue = (v) => String(+(+v).toFixed(4));
   const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -141,6 +152,7 @@
     selected: indexById.has(saved.selectedId) ? indexById.get(saved.selectedId) : -1,
     hovered: -1,
     theme: saved.theme,
+    highlightSudden: saved.highlightSudden === true,
     values: PATIENTS.X.map((row) => row.slice()),
   };
   // Изменения храним по ID пациента: он одинаков в обоих датасетах
@@ -174,7 +186,7 @@
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
           dataset: state.dataset, perplexity: state.perplexity, models: state.models, selectedId: PATIENTS.id[state.selected],
-          theme: state.theme, lang: I18N.lang, editsById,
+          theme: state.theme, lang: I18N.lang, highlightSudden: state.highlightSudden, editsById,
         }));
       } catch (e) { /* хранилище недоступно — состояние живёт только до перезагрузки */ }
     }, 200);
@@ -384,6 +396,28 @@
     ctx.arc(x, y, r, 0, Math.PI * 2);
   }
 
+  function diamond(x, y, r) {
+    ctx.beginPath();
+    ctx.moveTo(x, y - r);
+    ctx.lineTo(x + r, y);
+    ctx.lineTo(x, y + r);
+    ctx.lineTo(x - r, y);
+    ctx.closePath();
+  }
+
+  // Внезапная необъяснимая смерть от ССЗ — ромб цвета исхода с обводкой цветом текста
+  function drawSudden(x, y, r) {
+    diamond(x, y, r + 2);
+    ctx.fillStyle = colors.surface;
+    ctx.fill();
+    diamond(x, y, r);
+    ctx.fillStyle = colors.t[1];
+    ctx.fill();
+    ctx.strokeStyle = colors.ink;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
   function drawMap() {
     ctx.clearRect(0, 0, screen.w, screen.h);
     if (!ds.tsne) return;
@@ -391,16 +425,23 @@
     const Y = ds.tsne.Y;
     const r = n > 800 ? 3 : 4;
 
-    // Пациенты; у каждой точки кольцо цвета фона, чтобы перекрывающиеся точки читались
+    // Пациенты; у каждой точки кольцо цвета фона, чтобы перекрывающиеся точки читались.
+    // В режиме выделения внезапных смертей остальные точки приглушены
     ctx.lineWidth = n > 800 ? 1 : 1.5;
     ctx.strokeStyle = colors.surface;
+    ctx.globalAlpha = state.highlightSudden ? 0.2 : 1;
     for (let i = 0; i < n; i++) {
       const g = rows[i];
-      if (editedSet.has(g)) continue;
+      if (editedSet.has(g) || PATIENTS.sudden[g]) continue;
       circle(sx(disp[2 * i]), sy(disp[2 * i + 1]), r);
       ctx.fillStyle = colors.t[PATIENTS.target[g]];
       ctx.fill();
       ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    for (let i = 0; i < n; i++) {
+      const g = rows[i];
+      if (PATIENTS.sudden[g] && !editedSet.has(g)) drawSudden(sx(disp[2 * i]), sy(disp[2 * i + 1]), state.highlightSudden ? 7 : 5);
     }
 
     // Изменённые пациенты: исходное место (пустой кружок) → линия → новое положение
@@ -424,6 +465,10 @@
       circle(x1, y1, 6.5);
       ctx.fillStyle = colors.edit;
       ctx.fill();
+      if (PATIENTS.sudden[g]) {
+        drawSudden(x1, y1, 4);
+        continue;
+      }
       circle(x1, y1, 4);
       ctx.fillStyle = colors.t[PATIENTS.target[g]];
       ctx.fill();
@@ -473,21 +518,31 @@
     return best;
   }
 
+  function suddenParams(g) {
+    const share = PATIENTS.sudden_survived[g];
+    return {
+      d: fmtDays(PATIENTS.time[g]), k: BUNDLE.meta.sudden_neighbours, share: fmtPct(share),
+      horizon: t(`sudden.h${PATIENTS.sudden_horizon[g]}`), wrong: Math.round(100 * share),
+    };
+  }
+
   function showTooltip(g, px, py) {
     const m = state.model;
     const rows = [
       [days(PATIENTS.time[g]), t('tt.time')],
       [outcome(g), t('tt.outcome', { t: PATIENTS.target[g] })],
       [t('days', { n: fmtObserved(g) }), t('tt.real')],
-      [days(baseTime[m][g]), t('tt.pred', { model: MODELS[m] })],
+      [daysTime(baseTime[m][g]), t('tt.pred', { model: MODELS[m] })],
       [fmtPct(baseConf[m][g]), t('tt.conf', { tol: TOLERANCE })],
     ];
-    if (editedSet.has(g)) rows.push([days(curTime[m][g]), t('tt.predEdit')]);
+    if (editedSet.has(g)) rows.push([daysTime(curTime[m][g]), t('tt.predEdit')]);
     tooltip.replaceChildren(
       el('div', { class: 'tt-title' },
         el('span', { class: `dot t${PATIENTS.target[g]}` }),
         t('tt.title', { id: PATIENTS.id[g], row: ds.local[g] }) + (PATIENTS.split[g] === 2 ? t('tt.heldOut') : '')),
       ...rows.map(([value, label]) => el('div', { class: 'tt-row' }, el('b', { text: value }), el('span', { text: label }))),
+      PATIENTS.sudden[g] ? el('div', { class: 'tt-note' }, el('span', { class: 'diamond' }),
+        el('span', { text: `${t('sudden.label')}: ${t('sudden.short', suddenParams(g))}` })) : null,
     );
     tooltip.style.display = 'block';
     const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
@@ -547,13 +602,13 @@
 
     $('prediction-sub').textContent = t('pred.sub', { id: PATIENTS.id[g], model: MODELS[m] });
     $('hero-label').textContent = t(edited ? 'hero.edited' : 'hero.dataset', { model: MODELS[m] });
-    $('hero-value').replaceChildren(fmtDays(cur.time), el('span', { class: 'unit', text: t('unit.days') }));
+    $('hero-value').replaceChildren(fmtTime(cur.time), el('span', { class: 'unit', text: t('unit.days') }));
     if (edited) {
       const diff = cur.time - base.time;
       const arrow = diff > 0 ? '▲' : diff < 0 ? '▼' : '';
       $('hero-delta').replaceChildren(
         el('b', { text: `${arrow} ${diff >= 0 ? '+' : '−'}${days(Math.abs(diff))}` }),
-        t('hero.delta', { v: fmtDays(base.time) }));
+        t('hero.delta', { v: fmtTime(base.time) }));
     } else {
       $('hero-delta').textContent = t('hero.hint');
     }
@@ -584,7 +639,14 @@
     ].filter(Boolean));
     // Если наблюдение закончилось до τ без смерти от ССЗ, min(T, τ) неизвестно — есть только нижняя граница
     const subKey = observed(g).exact ? 'hero.sub' : PATIENTS.death_any[g] ? 'hero.subOther' : 'hero.subCensored';
-    $('hero-sub').textContent = t(subKey, { tau: fmtDays(TAU), v: fmtDays(Math.min(time, TAU)) });
+    $('hero-sub').textContent = (cur.time >= TAU ? t('hero.horizon', { tau: fmtDays(TAU) }) + ' ' : '')
+      + t(subKey, { tau: fmtDays(TAU), v: observed(g).exact ? fmtObserved(g) : fmtDays(time) });
+
+    const note = $('sudden-note');
+    note.hidden = !PATIENTS.sudden[g];
+    if (PATIENTS.sudden[g]) {
+      note.replaceChildren(el('b', {}, el('span', { class: 'diamond' }), t('sudden.title')), t('sudden.note', suddenParams(g)));
+    }
 
     renderSurvivalChart(g, base.curve, edited ? cur.curve : null);
     renderModelTable();
@@ -605,8 +667,8 @@
         el('td', { text: fmtPct(metrics[m].within_tolerance) }),
         el('td', { text: fmtPct(metrics[m].errors_over_1000) }),
         el('td', { text: I18N.fixed(metrics[m].brier_s_tau, 3) }),
-        el('td', { text: t('days.short', { n: fmtDays(baseTime[m][g]) }) }),
-        el('td', { text: edited ? t('days.short', { n: fmtDays(curTime[m][g]) }) : '—' }));
+        el('td', { text: t('days.short', { n: fmtTime(baseTime[m][g]) }) }),
+        el('td', { text: edited ? t('days.short', { n: fmtTime(curTime[m][g]) }) : '—' }));
       tr.addEventListener('click', (e) => { if (e.target !== radio) setModel(m); });
       return tr;
     }));
@@ -623,8 +685,8 @@
     const g = state.selected, m = state.model;
     const edited = editedSet.has(g);
     const predicted = edited
-      ? [el('b', { text: fmtDays(baseTime[m][g]) }), ' → ', el('b', { text: days(curTime[m][g]) })]
-      : [el('b', { text: days(baseTime[m][g]) })];
+      ? [el('b', { text: fmtTime(baseTime[m][g]) }), ' → ', el('b', { text: daysTime(curTime[m][g]) })]
+      : [el('b', { text: daysTime(baseTime[m][g]) })];
     $('mini-summary').replaceChildren(
       el('span', {}, t('mini.time'), el('b', { text: days(PATIENTS.time[g]) })),
       el('span', {}, t('mini.pred', { model: MODELS[m] }), ...predicted),
@@ -904,13 +966,14 @@
     tableRows[i].replaceChildren(
       el('td', { text: i }),
       el('td', { text: PATIENTS.id[g] }),
-      el('td', {}, el('span', { class: 'outcome' }, el('span', { class: `dot t${PATIENTS.target[g]}` }), outcome(g))),
+      el('td', {}, el('span', { class: 'outcome' }, el('span', { class: `dot t${PATIENTS.target[g]}` }), outcome(g),
+        PATIENTS.sudden[g] ? el('span', { class: 'diamond', title: t('sudden.label') }) : null)),
       el('td', { text: fmtDays(PATIENTS.time[g]) }),
       el('td', { text: fmtObserved(g) }),
-      el('td', { text: fmtDays(baseTime[m][g]) }),
+      el('td', { text: fmtTime(baseTime[m][g]) }),
       el('td', { text: fmtError(g, baseTime[m][g]) }),
       el('td', { class: baseConf[m][g] >= CONFIDENT ? '' : 'low-conf', text: fmtPct(baseConf[m][g]) }),
-      el('td', { text: editedSet.has(g) ? fmtDays(curTime[m][g]) : '—' }),
+      el('td', { text: editedSet.has(g) ? fmtTime(curTime[m][g]) : '—' }),
     );
   }
 
@@ -1062,6 +1125,7 @@
   function renderTexts() {
     $('legend-t0').textContent = t('legend.t0', { n: fmtDays(ds.counts[0]) });
     $('legend-t1').textContent = t('legend.t1', { n: fmtDays(ds.counts[1]) });
+    $('legend-sudden').textContent = t('sudden.legend', { n: fmtDays(ds.rows.reduce((sum, g) => sum + PATIENTS.sudden[g], 0)) });
     $('generated').textContent = t('footer.generated', { date: BUNDLE.meta.generated });
     $('theme-toggle').setAttribute('aria-label', t(effectiveDark() ? 'theme.toLight' : 'theme.toDark'));
     for (const option of $('dataset-select').options) {
@@ -1129,6 +1193,12 @@
     });
 
     $('reset-all').addEventListener('click', resetAll);
+    $('highlight-sudden').checked = state.highlightSudden;
+    $('highlight-sudden').addEventListener('change', (e) => {
+      state.highlightSudden = e.target.checked;
+      drawMap();
+      save();
+    });
     $('reset-all').disabled = editedSet.size === 0;
     $('download').addEventListener('click', downloadCsv);
 

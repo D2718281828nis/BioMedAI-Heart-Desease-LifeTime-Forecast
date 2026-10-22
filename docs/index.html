@@ -148,6 +148,12 @@
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
   .dot.t0 { background: var(--t0); }
   .dot.t1 { background: var(--t1); }
+  .diamond { width: 8px; height: 8px; background: var(--t1); border: 1.5px solid var(--ink); transform: rotate(45deg); display: inline-block; margin: 0 2px; flex: none; }
+  .sudden-key { cursor: pointer; white-space: normal; flex-wrap: wrap; }
+  .sudden-key input { margin: 0 0 0 4px; accent-color: var(--ink); }
+  .callout { margin-top: 14px; padding: 10px 12px; border-left: 3px solid var(--t1); background: var(--wash); border-radius: 6px; font-size: 13px; color: var(--ink-2); }
+  .callout b { display: flex; align-items: center; gap: 8px; color: var(--ink); margin-bottom: 2px; }
+  .tt-note { max-width: 300px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--grid); color: var(--ink-2); display: flex; gap: 8px; align-items: baseline; }
   .ring { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--ink); display: inline-block; }
   .edit-key { display: inline-flex; align-items: center; }
   .edit-key i { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--muted); display: inline-block; }
@@ -327,6 +333,8 @@
           <span class="key"><span class="dot t0"></span><span id="legend-t0"></span></span>
           <span class="key"><span class="ring"></span><span data-i18n="legend.selected"></span></span>
           <span class="key"><span class="edit-key"><i></i><b></b><em></em></span><span data-i18n="legend.edited"></span></span>
+          <label class="key sudden-key"><span class="diamond"></span><span id="legend-sudden"></span>
+            <input type="checkbox" id="highlight-sudden"><span data-i18n="sudden.highlight"></span></label>
         </div>
       </div>
       <div class="map-wrap" id="map-wrap">
@@ -353,6 +361,7 @@
         </div>
         <dl class="facts" id="facts"></dl>
       </div>
+      <div class="callout" id="sudden-note" hidden></div>
       <div class="chart" id="survival-chart"></div>
       <div class="chart-legend" id="survival-legend"></div>
       <p class="chart-note" data-i18n-html="chart.note"></p>
