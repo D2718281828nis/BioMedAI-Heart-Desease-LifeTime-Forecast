@@ -44,13 +44,28 @@ JS_PREFIX = 'window.SURVIVAL_MODEL = '
 # Горизонт τ и дневная сетка — как в ноутбуке
 TAU = 1500
 GRID = np.arange(TAU)
+# Допустимая ошибка прогноза, дни, и порог уверенности P(|ошибка| ≤ TOLERANCE), начиная с которого прогноз надёжен
+TOLERANCE = 150
+CONFIDENT = 0.9
 MODEL_NAMES = {
     'cph': 'CoxPH',
     'aft': 'Weibull AFT',
     'xgb': 'XGBoost Cox',
     'nn': 'NN Survival',
     'rn': 'RN Survival',
+    'two': 'Two-stage',
 }
+# Модели ноутбука с калибровкой S(t); 'two' — двухэтапный алгоритм (train_two_stage)
+SURVIVAL_MODELS = ['cph', 'aft', 'xgb', 'nn', 'rn']
+
+# Двухэтапный алгоритм: этап 1 — классификатор «смерть от ССЗ в первые EARLY_DAYS дней», этап 2 — отдельные модели
+# времени для групп. Настройки выбраны кросс-валидацией только на обучающей выборке: E из {90, 180, 365} дней,
+# классификатор (логистическая регрессия или XGBoost; 30 исходных признаков или вместе с конструированными —
+# приближённая шкала GRACE, shock index, eGFR CKD-EPI, флаги шока, ФВ < 40%, анемии, гипергликемии, лейкоцитоза,
+# возраста ≥ 75), модель времени ранней смерти (медиана или Weibull AFT по признакам) и порог 0,3–0,7.
+# Лучшим оказался XGBoost по исходным признакам с медианой; конструированные признаки точность не повысили.
+EARLY_DAYS = 365
+EARLY_THRESHOLD = 0.4
 # Роль пациента в обучении (patients.split в docs/survival_model.js)
 SPLIT_CALIBRATION, SPLIT_TRAIN, SPLIT_TEST = 0, 1, 2
 SPLIT_NAMES = {SPLIT_CALIBRATION: 'обучающая выборка (только калибровка: цензурирован до τ)',
@@ -182,7 +197,7 @@ def recalibrate(full, df, features, bal_train, cal_train, m):
     from sklearn.model_selection import StratifiedKFold
 
     train_all = bal_train.append(cal_train)
-    scores = {k: pd.Series(np.nan, index=train_all) for k in MODEL_NAMES}
+    scores = {k: pd.Series(np.nan, index=train_all) for k in SURVIVAL_MODELS}
     folds = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     for fold_train, fold_val in folds.split(bal_train, df.loc[bal_train, 'target']):
         fold = train_models(df, features, bal_train[fold_train])
@@ -195,14 +210,74 @@ def recalibrate(full, df, features, bal_train, cal_train, m):
     data = pd.DataFrame({'time': full.loc[train_all, 'time'].values, 'event': full.loc[train_all, 'target'].values})
     return {k: (WeibullAFTFitter() if k == 'aft' else CoxPHFitter()).fit(
                 data.assign(score=scores[k].values), duration_col='time', event_col='event')
-            for k in MODEL_NAMES}
+            for k in SURVIVAL_MODELS}
 
 
 def library_survival(m, calibrators, X_sc, features):
     """Функции выживаемости S(t) на сетке средствами самих библиотек (lifelines, xgboost, keras), форма (n, τ)."""
     scores = risk_scores(m, X_sc, features)
     return {k: calibrators[k].predict_survival_function(pd.DataFrame({'score': scores[k]}), times=GRID).values.T
-            for k in MODEL_NAMES}
+            for k in SURVIVAL_MODELS}
+
+
+# ---------------------------------------------------------------------------
+# Двухэтапный алгоритм
+# ---------------------------------------------------------------------------
+def train_two_stage(full, features, train_idx, scaler):
+    """Этап 1: XGBoost-классификатор «смерть от ССЗ в первые EARLY_DAYS дней» по 30 стандартизованным признакам;
+    обучается на пациентах с известным статусом на EARLY_DAYS (цензурированные раньше не входят), вероятность
+    калибруется по Платту на оценках вне выборки (5 фолдов). Этап 2: для группы ранней смерти прогноз — медиана дня
+    смерти у ранних смертей обучающей выборки; для остальных — новая модель Кокса, обученная на пациентах, проживших
+    дольше EARLY_DAYS, прогноз — медиана её S(t)."""
+    from lifelines import CoxPHFitter
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import StratifiedKFold
+    from xgboost import XGBClassifier
+
+    time = full.loc[train_idx, 'time'].values.astype(float)
+    event = full.loc[train_idx, 'target'].values.astype(bool)
+    Z = scaler.transform(full.loc[train_idx, features])
+    label = np.where(event & (time <= EARLY_DAYS), 1, np.where(time > EARLY_DAYS, 0, -1))
+    known = label >= 0
+
+    def make_classifier():
+        return XGBClassifier(n_estimators=300, learning_rate=0.03, max_depth=2, subsample=0.8, colsample_bynode=0.8,
+                             min_child_weight=2, random_state=42, eval_metric='logloss')
+    classifier = make_classifier().fit(Z[known], label[known])
+    margin_oof = np.zeros(known.sum())
+    for fold_train, fold_val in StratifiedKFold(5, shuffle=True, random_state=0).split(Z[known], label[known]):
+        fold = make_classifier().fit(Z[known][fold_train], label[known][fold_train])
+        margin_oof[fold_val] = fold.predict(Z[known][fold_val], output_margin=True)
+    platt = LogisticRegression(C=1e6).fit(margin_oof[:, None], label[known])
+
+    early_days = np.sort(time[label == 1]).astype(int)
+    late = time > EARLY_DAYS
+    late_data = pd.DataFrame(Z[late], columns=features).assign(time=time[late], event=event[late].astype(int))
+    late_cox = CoxPHFitter(penalizer=0.1).fit(late_data, duration_col='time', event_col='event')
+    return dict(classifier=classifier, platt_a=float(platt.coef_[0, 0]), platt_b=float(platt.intercept_[0]),
+                early_days=early_days, early_time=int(round(np.median(early_days))), late_cox=late_cox,
+                Z_known=Z[known])
+
+
+def two_stage_mixture(margin, platt_a, platt_b, early_days, S_late, early_time):
+    """Прогноз двухэтапного алгоритма по марже классификатора и S(t) модели «остальных».
+    Время: медиана дня ранней смерти, если вероятность классификатора ≥ EARLY_THRESHOLD, иначе медиана S_late.
+    Функция выживаемости — смесь p·S_early + (1 − p)·S_late с откалиброванной вероятностью p; по ней считаются
+    уверенность, RMST и риск — так же, как у остальных моделей."""
+    p_raw = 1 / (1 + np.exp(-margin))
+    p_cal = 1 / (1 + np.exp(-(platt_a * margin + platt_b)))
+    S_early = (np.asarray(early_days)[None, :] > GRID[:, None]).mean(axis=1)   # P(T > t | ранняя смерть)
+    below = S_late <= 0.5
+    late_time = np.where(below.any(axis=1), below.argmax(axis=1), TAU)
+    time = np.where(p_raw >= EARLY_THRESHOLD, early_time, late_time)
+    return p_cal[:, None] * S_early[None, :] + (1 - p_cal[:, None]) * S_late, time
+
+
+def library_two_stage(ts, X_sc, features):
+    """Двухэтапный прогноз средствами самих библиотек (xgboost, lifelines): (S(t), время)."""
+    S_late = ts['late_cox'].predict_survival_function(pd.DataFrame(X_sc, columns=features), times=GRID).values.T
+    return two_stage_mixture(ts['classifier'].predict(X_sc, output_margin=True), ts['platt_a'], ts['platt_b'],
+                             ts['early_days'], S_late, ts['early_time'])
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +329,7 @@ def _xgb_leaf_sum(trees, X_sc):
     return out
 
 
-def export_params(df, features, train_idx, m, calibrators):
+def export_params(df, features, train_idx, m, calibrators, ts):
     X_train_sc = m['scaler'].transform(df.loc[train_idx, features])
     trees, base_margin = _export_xgb_trees(m['xgb_surv'], X_train_sc)
     nn_weights = m['nn_model'].get_weights()  # W1, b1, W2, b2, W3, b3
@@ -288,8 +363,18 @@ def export_params(df, features, train_idx, m, calibrators):
                    'W_in': _f32_b64(m['W_in']), 'coef': _f32_b64(m['rn_readout'].coef_[0]),
                    'intercept': float(m['rn_readout'].intercept_[0]),
                    'calibrator': _export_cox(calibrators['rn'], ['score'])},
+            'two': _export_two_stage(ts, features),
         },
     }
+
+
+def _export_two_stage(ts, features):
+    trees, base_margin = _export_xgb_trees(ts['classifier'], ts['Z_known'])
+    return {'type': 'two_stage', 'early_days': EARLY_DAYS, 'threshold': EARLY_THRESHOLD,
+            'classifier': {'trees': trees, 'bias': float(base_margin)},
+            'platt': {'a': ts['platt_a'], 'b': ts['platt_b']},
+            'early_death_days': ts['early_days'].tolist(), 'early_time': ts['early_time'],
+            'late': _export_cox(ts['late_cox'], features)}
 
 
 # ---------------------------------------------------------------------------
@@ -343,10 +428,18 @@ class SurvivalTimePredictor:
             return (np.tanh(X_sc @ self._rn_W) @ self._rn_coef + m['intercept'])[:, None]
         raise ValueError(name)
 
+    def _two_stage(self, X_sc):
+        m = self.models['two']
+        margin = _xgb_leaf_sum(m['classifier']['trees'], X_sc) + m['classifier']['bias']
+        return two_stage_mixture(margin, m['platt']['a'], m['platt']['b'], m['early_death_days'],
+                                 self._cox(m['late'], X_sc), m['early_time'])
+
     def survival(self, X_raw, name):
         """S(t) на сетке 0..τ−1 для исходных (нестандартизованных) признаков, форма (n, τ)."""
         X_sc = (np.atleast_2d(np.asarray(X_raw, dtype=float)) - self.mean) / self.scale
         m = self.models[name]
+        if name == 'two':
+            return self._two_stage(X_sc)[0]
         if name == 'cph':
             return self._cox(m, X_sc)
         if name == 'aft':
@@ -355,22 +448,46 @@ class SurvivalTimePredictor:
         return self._cox(m['calibrator'], self.risk_score(X_sc, name))
 
     def predict(self, X_raw, name):
-        """Прогноз времени: RMST(τ) = Σ S(t) по дневной сетке (как в ноутбуке), S(τ), медиана дожития
-        и риск смерти от ССЗ в течение года."""
-        S = self.survival(X_raw, name)
+        if name == 'two':
+            X_sc = (np.atleast_2d(np.asarray(X_raw, dtype=float)) - self.mean) / self.scale
+            return point_prediction(*self._two_stage(X_sc))
+        return point_prediction(self.survival(X_raw, name))
+
+
+def point_prediction(S, time=None):
+    """Прогноз min(T, τ) по функциям выживаемости S (n, τ).
+
+    time — медиана: первый день, когда S(t) ≤ 0,5, или τ, если S(t) > 0,5 на всём горизонте. Медиана минимизирует
+    среднюю абсолютную ошибку (у RMST — среднего — она больше: при исходах «рано умер» или «дожил» среднее
+    попадает между ними). confidence — вероятность по самой модели, что |min(T, τ) − time| ≤ TOLERANCE:
+    S(time − TOLERANCE − 1) − S(time + TOLERANCE), где S(−1) = 1, а за τ S = 0 (масса «дожил до τ» — в точке τ).
+    rmst — RMST(τ) = Σ S(t), ожидаемое число дней без смерти от ССЗ (как в ноутбуке).
+    Если time задано (двухэтапный алгоритм выбирает время сам), уверенность считается вокруг него."""
+    S = np.atleast_2d(S)
+    n, tau = S.shape
+    if time is None:
         below = S <= 0.5
-        median = np.where(below.any(axis=1), below.argmax(axis=1), np.nan)
-        return {'rmst': S.sum(axis=1), 's_tau': S[:, -1], 'median': median, 'risk_1y': 1 - S[:, 365]}
+        time = np.where(below.any(axis=1), below.argmax(axis=1), tau)
+    time = np.asarray(time).astype(int)
+    padded = np.hstack([np.ones((n, 1)), S, np.zeros((n, 1))])   # padded[k] = S(k − 1); padded[τ + 1] = 0
+    lo = np.maximum(time - TOLERANCE, 0)
+    hi = np.minimum(time + TOLERANCE, tau)
+    rows = np.arange(n)
+    confidence = padded[rows, lo] - padded[rows, hi + 1]
+    return {'time': time, 'confidence': confidence, 'rmst': S.sum(axis=1), 's_tau': S[:, -1],
+            'risk_1y': 1 - S[:, 365]}
 
 
 # ---------------------------------------------------------------------------
 # Метрики на отложенной выборке с учётом цензурирования
 # ---------------------------------------------------------------------------
-def test_metrics(curves, time_obs, event_obs, time_train, event_train):
+def test_metrics(curves, time_obs, event_obs, time_train, event_train, times=None):
     """C-index; Brier score прогноза S(τ) с весами IPCW (обратная вероятность не быть цензурированным —
     так в оценку корректно входят пациенты, цензурированные до τ); ошибка калибровки RMST — среднее
-    |прогноз − RMST Каплана — Мейера| по квинтилям прогноза; средняя абсолютная ошибка прогноза min(T, τ)
-    у пациентов, для которых он известен (веса IPCW)."""
+    |прогноз − RMST Каплана — Мейера| по квинтилям прогноза. Для прогноза времени (медианы) — у пациентов
+    с известным min(T, τ), с весами IPCW: средняя абсолютная ошибка, доля прогнозов с ошибкой ≤ TOLERANCE,
+    а также доля пациентов с уверенностью ≥ CONFIDENT и фактическая доля ошибок ≤ TOLERANCE среди них.
+    times — прогноз времени моделей, которые выбирают его не медианой S(t) (двухэтапный алгоритм)."""
     from lifelines import KaplanMeierFitter
     from lifelines.utils import concordance_index, restricted_mean_survival_time
     km_censoring = KaplanMeierFitter().fit(time_train, 1 - event_train)
@@ -382,17 +499,25 @@ def test_metrics(curves, time_obs, event_obs, time_train, event_train):
     known = weights > 0
     true_tau = np.minimum(time_obs, TAU)
 
+    weighted = lambda values, mask: float(np.sum((weights * values)[mask]) / weights[mask].sum())
     out = {}
     for name, S in curves.items():
-        rmst = S.sum(axis=1)
+        p = point_prediction(S, (times or {}).get(name))
+        rmst = p['rmst']
         groups = pd.qcut(pd.Series(rmst).rank(method='first'), 5, labels=False).values
         calibration = np.mean([abs(rmst[groups == g].mean() - restricted_mean_survival_time(
             KaplanMeierFitter().fit(time_obs[groups == g], event_obs[groups == g]), t=TAU)) for g in range(5)])
+        error = np.abs(p['time'] - true_tau)
+        confident = known & (p['confidence'] >= CONFIDENT)
         out[name] = {
             'c_index': float(concordance_index(time_obs, rmst, event_obs)),
             'brier_s_tau': float(np.sum(weights * ((time_obs >= TAU) - S[:, -1]) ** 2) / len(time_obs)),
             'calibration_rmst': float(calibration),
-            'mae_rmst': float(np.sum((weights * np.abs(rmst - true_tau))[known]) / weights[known].sum()),
+            'mae_rmst': weighted(np.abs(rmst - true_tau), known),
+            'mae': weighted(error, known),
+            'within_tolerance': weighted(error <= TOLERANCE, known),
+            'confident_share': float(np.mean(p['confidence'] >= CONFIDENT)),
+            'confident_within_tolerance': weighted(error <= TOLERANCE, confident),
             'mean_s_tau': float(S[:, -1].mean()),
         }
     out['_km_s_tau'] = float(KaplanMeierFitter().fit(time_obs, event_obs).survival_function_at_times(TAU - 1).iloc[0])
@@ -409,13 +534,20 @@ def cmd_export(args):
     print(f'Калибруем S(t) на всей обучающей когорте ({len(bal_train) + len(cal_train)} пациентов)...')
     calibrators = recalibrate(full, df, features, bal_train, cal_train, m)
 
-    # Эталонный прогноз библиотек — для всех пациентов полного датасета
-    reference = library_survival(m, calibrators, m['scaler'].transform(full[features]), features)
-    test_pos = full.index.get_indexer(test_idx)
     train_all = bal_train.append(cal_train)
+    print(f'Двухэтапный алгоритм: классификатор смерти от ССЗ ≤ {EARLY_DAYS} дн. и две модели времени...')
+    ts = train_two_stage(full, features, train_all, m['scaler'])
+
+    # Эталонный прогноз библиотек — для всех пациентов полного датасета
+    X_all_sc = m['scaler'].transform(full[features])
+    reference = library_survival(m, calibrators, X_all_sc, features)
+    reference['two'], two_time = library_two_stage(ts, X_all_sc, features)
+    reference_pred = {k: point_prediction(S, two_time if k == 'two' else None) for k, S in reference.items()}
+    test_pos = full.index.get_indexer(test_idx)
     metrics = test_metrics({k: S[test_pos] for k, S in reference.items()},
                            full.loc[test_idx, 'time'].values.astype(float), full.loc[test_idx, 'target'].values.astype(bool),
-                           full.loc[train_all, 'time'].values.astype(float), full.loc[train_all, 'target'].values)
+                           full.loc[train_all, 'time'].values.astype(float), full.loc[train_all, 'target'].values,
+                           times={'two': two_time[test_pos]})
     km_s_tau = metrics.pop('_km_s_tau')
     cohort_km = KaplanMeierFitter().fit(full['time'], full['target'])
 
@@ -425,7 +557,7 @@ def cmd_export(args):
     split[full.index.isin(cal_train)] = SPLIT_CALIBRATION
     bundle = {
         'meta': {'tau': TAU, 'generated': date.today().isoformat(), 'notebook': 'Survival-function-analysys.ipynb',
-                 'model_names': MODEL_NAMES,
+                 'model_names': MODEL_NAMES, 'tolerance': TOLERANCE, 'confident': CONFIDENT,
                  # Каплан — Мейер по всей когорте: средний риск — для сравнения с прогнозом пациента
                  'cohort_risk_1y': float(1 - cohort_km.survival_function_at_times(365).iloc[0]),
                  'cohort_s_tau': float(cohort_km.survival_function_at_times(TAU - 1).iloc[0]),
@@ -444,22 +576,25 @@ def cmd_export(args):
             'balanced': {'file': BALANCED_CSV.name, 'rows': full.index.get_indexer(df.index).tolist()},
             'full': {'file': FULL_XLSX.name, 'rows': None},
         },
-        **export_params(df, features, bal_train, m, calibrators),
+        **export_params(df, features, bal_train, m, calibrators, ts),
         'metrics': metrics,
-        # RMST(τ) по самим библиотекам — эталон для проверки JavaScript-расчёта (scripts/check_js_predictor.js)
+        # Прогноз по самим библиотекам — эталон для проверки JavaScript-расчёта (scripts/check_js_predictor.js)
         'reference_rmst': {k: _round(S.sum(axis=1), 9) for k, S in reference.items()},
+        'reference_time': {k: p['time'].tolist() for k, p in reference_pred.items()},
+        'reference_confidence': {k: _round(p['confidence'], 6) for k, p in reference_pred.items()},
     }
 
     # Проверка: расчёт по экспортированным параметрам совпадает с библиотеками
     predictor = SurvivalTimePredictor(json.loads(json.dumps(bundle)))
     print(f'Отложенная выборка: {len(test_idx)} пациентов, S(τ) по Каплану — Мейеру {km_s_tau:.3f}')
-    print(f'{"модель":<12} {"C-index":>8} {"Brier IPCW":>11} {"калибр. RMST":>13} {"MAE RMST":>9} '
-          f'{"ср. S(τ)":>9} {"max |ΔRMST|":>12}')
+    print(f'{"модель":<12} {"C-index":>8} {"Brier":>6} {"калибр.":>8} {"MAE":>7} {"MAE RMST":>9} '
+          f'{f"≤{TOLERANCE} дн":>8} {f"P≥{CONFIDENT}":>7} {"из них ≤":>9} {"ср. S(τ)":>9} {"max |ΔRMST|":>12}')
     for name in MODEL_NAMES:
         diff = np.abs(predictor.predict(full[features].values, name)['rmst'] - reference[name].sum(axis=1)).max()
         r = metrics[name]
-        print(f'{MODEL_NAMES[name]:<12} {r["c_index"]:>8.4f} {r["brier_s_tau"]:>11.3f} {r["calibration_rmst"]:>10.1f} дн '
-              f'{r["mae_rmst"]:>6.0f} дн {r["mean_s_tau"]:>9.3f} {diff:>12.2e}')
+        print(f'{MODEL_NAMES[name]:<12} {r["c_index"]:>8.4f} {r["brier_s_tau"]:>6.3f} {r["calibration_rmst"]:>5.0f} дн '
+              f'{r["mae"]:>4.0f} дн {r["mae_rmst"]:>6.0f} дн {r["within_tolerance"]:>8.1%} {r["confident_share"]:>7.0%} '
+              f'{r["confident_within_tolerance"]:>9.1%} {r["mean_s_tau"]:>9.3f} {diff:>12.2e}')
         assert diff < 0.05, f'{name}: расчёт по параметрам расходится с библиотекой'
 
     out = Path(args.out)
@@ -501,13 +636,13 @@ def cmd_predict(args):
     for i in np.flatnonzero(x_edit != x):
         print(f'  {predictor.features[i]}: {x[i]:g} → {x_edit[i]:g}')
     names = MODEL_NAMES if args.model == 'all' else {args.model: MODEL_NAMES[args.model]}
-    print(f'{"модель":<12} {"RMST(τ), дни":>13} {"с изменениями":>14} {"S(τ)":>6} {"риск 1 год":>11} {"медиана":>8}')
+    print(f'{"модель":<12} {"прогноз, дни":>13} {"с изменениями":>14} {f"P(|ош.| ≤ {TOLERANCE})":>16} '
+          f'{"RMST(τ)":>8} {"S(τ)":>6} {"риск 1 год":>11}')
     for name, title in names.items():
         base = predictor.predict(x, name)
         edit = predictor.predict(x_edit, name)
-        median = edit['median'][0]
-        print(f'{title:<12} {base["rmst"][0]:>13.0f} {edit["rmst"][0]:>14.0f} {edit["s_tau"][0]:>6.3f} '
-              f'{edit["risk_1y"][0]:>11.1%} {(f"{median:.0f}" if np.isfinite(median) else f"> {TAU}"):>8}')
+        print(f'{title:<12} {base["time"][0]:>13} {edit["time"][0]:>14} {edit["confidence"][0]:>16.1%} '
+              f'{edit["rmst"][0]:>8.0f} {edit["s_tau"][0]:>6.3f} {edit["risk_1y"][0]:>11.1%}')
 
 
 def main():

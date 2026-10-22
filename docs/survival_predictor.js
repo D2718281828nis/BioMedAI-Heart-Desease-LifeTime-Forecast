@@ -39,12 +39,45 @@
     const d = features.length;
 
     // Пороги и листья XGBoost хранятся как float32: сравнение признака с порогом тоже во float32, как в xgboost
-    const trees = models.xgb.trees.map((t) => ({
+    const prepareTrees = (list) => list.map((t) => ({
       left: Int32Array.from(t.left),
       right: Int32Array.from(t.right),
       feature: Int32Array.from(t.feature),
       value: Float64Array.from(t.value, Math.fround),
     }));
+    function treeSum(trees, z) {
+      const zf = Float64Array.from(z, Math.fround);
+      let sum = 0;
+      for (const t of trees) {
+        let node = 0;
+        while (t.left[node] !== -1) node = zf[t.feature[node]] < t.value[node] ? t.left[node] : t.right[node];
+        sum += t.value[node];
+      }
+      return sum;
+    }
+    const trees = prepareTrees(models.xgb.trees);
+    const sigmoid = (v) => 1 / (1 + Math.exp(-v));
+
+    // Двухэтапный алгоритм — как two_stage_mixture() в scripts/survival_time_predictor.py:
+    // этап 1 — классификатор смерти от ССЗ в первые early_days дней (деревья XGBoost, вероятность по Платту);
+    // этап 2 — медиана дня ранней смерти либо медиана S(t) модели Кокса, обученной на проживших дольше early_days.
+    // S(t) — смесь p·S_early + (1 − p)·S_late, по ней считаются уверенность, RMST и риск
+    const two = models.two;
+    const twoTrees = prepareTrees(two.classifier.trees);
+    const sEarly = new Float64Array(tau);
+    for (let t = 0; t < tau; t++) sEarly[t] = two.early_death_days.filter((d) => d > t).length / two.early_death_days.length;
+    function twoStage(z) {
+      const margin = treeSum(twoTrees, z) + two.classifier.bias;
+      const score = sigmoid(margin);
+      const pEarly = sigmoid(two.platt.a * margin + two.platt.b);
+      const late = coxSurvival(two.late, z);
+      let lateTime = tau;
+      for (let t = 0; t < tau; t++) if (late[t] <= 0.5) { lateTime = t; break; }
+      const curve = new Float64Array(tau);
+      for (let t = 0; t < tau; t++) curve[t] = pEarly * sEarly[t] + (1 - pEarly) * late[t];
+      const early = score >= two.threshold;
+      return { curve, time: early ? two.early_time : lateTime, stage: { early, score, threshold: two.threshold, days: two.early_days } };
+    }
     const nnLayers = models.nn.layers.map((l) => ({ ...l, W: decodeF32(l.W), b: decodeF32(l.b) }));
     const rn = models.rn;
     const rnW = decodeF32(rn.W_in);
@@ -56,16 +89,7 @@
       return z;
     }
 
-    function xgbLogRisk(z) {
-      const zf = Float64Array.from(z, Math.fround);
-      let sum = models.xgb.bias;
-      for (const t of trees) {
-        let node = 0;
-        while (t.left[node] !== -1) node = zf[t.feature[node]] < t.value[node] ? t.left[node] : t.right[node];
-        sum += t.value[node];
-      }
-      return sum;
-    }
+    const xgbLogRisk = (z) => treeSum(trees, z) + models.xgb.bias;
 
     // Логит нейросети (последний слой без сигмоиды) — оценка риска для калибратора
     function nnLogit(z) {
@@ -114,24 +138,36 @@
           return coxSurvival(m.calibrator, [nnLogit(z)]);
         case 'rn':
           return coxSurvival(m.calibrator, [rnLogit(z)]);
+        case 'two':
+          return twoStage(z).curve;
         default:
           throw new Error('Unknown model: ' + name);
       }
     }
 
-    // Прогноз времени: RMST(τ), вероятность не умереть от ССЗ до τ, медиана дожития (null, если S(t) > 0.5
-    // на всём горизонте) и риск смерти от ССЗ в течение года
+    // Прогноз min(T, τ) — как point_prediction() в scripts/survival_time_predictor.py.
+    // time — медиана: первый день, когда S(t) ≤ 0,5, или τ (оценка с наименьшей средней абсолютной ошибкой);
+    // confidence — вероятность по самой модели, что |min(T, τ) − time| ≤ tolerance;
+    // rmst — ожидаемое число дней без смерти от ССЗ в пределах τ; sTau = S(τ); risk1y — риск смерти от ССЗ за год;
+    // stage — у двухэтапного алгоритма: группа этапа 1 и оценка классификатора
+    const tolerance = bundle.meta.tolerance;
     function predict(xRaw, name) {
-      const curve = survival(xRaw, name);
-      let rmst = 0, median = null;
-      for (let t = 0; t < curve.length; t++) {
+      const two = name === 'two' ? twoStage(scale(xRaw)) : null;
+      const curve = two ? two.curve : survival(xRaw, name);
+      const n = curve.length;
+      let rmst = 0, median = n;
+      for (let t = 0; t < n; t++) {
         rmst += curve[t];
-        if (median === null && curve[t] <= 0.5) median = t;
+        if (median === n && curve[t] <= 0.5) median = t;
       }
-      return { curve, rmst, sTau: curve[curve.length - 1], median, risk1y: 1 - curve[365] };
+      const time = two ? two.time : median;
+      // S(k) с соглашениями S(−1) = 1 и S(k) = 0 при k ≥ τ: масса «дожил до τ» сосредоточена в точке τ
+      const S = (k) => (k < 0 ? 1 : k >= n ? 0 : curve[k]);
+      const confidence = S(Math.max(time - tolerance, 0) - 1) - S(Math.min(time + tolerance, n));
+      return { curve, time, confidence, rmst, sTau: curve[n - 1], risk1y: 1 - curve[365], stage: two ? two.stage : null };
     }
 
-    return { features, tau, modelNames: bundle.meta.model_names, scale, survival, predict };
+    return { features, tau, tolerance, modelNames: bundle.meta.model_names, scale, survival, predict };
   }
 
   return { createPredictor };

@@ -267,6 +267,7 @@
   .patients tbody tr:hover { background: var(--wash); }
   .patients tbody tr.active { background: var(--wash); box-shadow: inset 3px 0 0 var(--ink); }
   .outcome { display: inline-flex; align-items: center; gap: 6px; }
+  .patients td.low-conf { color: var(--muted); }
 
   .method { color: var(--ink-2); }
   .method ul { margin: 8px 0 0; padding-left: 18px; }
@@ -360,8 +361,9 @@
             <tr>
               <th scope="col" data-i18n="models.model"></th>
               <th scope="col" data-i18n="models.cindex"></th>
+              <th scope="col" data-i18n="models.mae"></th>
+              <th scope="col" data-i18n="models.within"></th>
               <th scope="col" data-i18n="models.brier"></th>
-              <th scope="col" data-i18n="models.calib"></th>
               <th scope="col" data-i18n="models.base"></th>
               <th scope="col" data-i18n="models.edit"></th>
             </tr>
@@ -369,6 +371,7 @@
           <tbody></tbody>
         </table>
       </div>
+      <p class="chart-note" id="models-note"></p>
     </section>
 
     <section class="card" id="editor-card" aria-labelledby="patient-title">

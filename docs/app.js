@@ -174,19 +174,33 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Прогноз времени (RMST) для всех пациентов и всех моделей
+  // Прогноз времени (медиана S(t)) и уверенность P(|ошибка| ≤ допуска) для всех пациентов и всех моделей
   // ---------------------------------------------------------------------------
-  const baseTime = {}; // по исходным значениям датасета
-  const curTime = {};  // по текущим значениям (с изменениями)
+  const TOLERANCE = BUNDLE.meta.tolerance;
+  const CONFIDENT = BUNDLE.meta.confident;
+  const baseTime = {}, baseConf = {}; // по исходным значениям датасета
+  const curTime = {}, curConf = {};   // по текущим значениям (с изменениями)
   for (const m of MODEL_KEYS) {
-    baseTime[m] = Float64Array.from(PATIENTS.X, (x) => predictor.predict(x, m).rmst);
+    baseTime[m] = new Float64Array(NP);
+    baseConf[m] = new Float64Array(NP);
+    PATIENTS.X.forEach((x, g) => {
+      const p = predictor.predict(x, m);
+      baseTime[m][g] = p.time;
+      baseConf[m][g] = p.confidence;
+    });
     curTime[m] = baseTime[m].slice();
+    curConf[m] = baseConf[m].slice();
   }
   function refreshTime(g) {
     const edited = isEdited(g);
     if (edited) editedSet.add(g); else editedSet.delete(g);
-    for (const m of MODEL_KEYS) curTime[m][g] = edited ? predictor.predict(state.values[g], m).rmst : baseTime[m][g];
+    for (const m of MODEL_KEYS) {
+      const p = edited ? predictor.predict(state.values[g], m) : null;
+      curTime[m][g] = p ? p.time : baseTime[m][g];
+      curConf[m][g] = p ? p.confidence : baseConf[m][g];
+    }
   }
+  const fmtPct = (v) => I18N.pct(v);
   for (let g = 0; g < NP; g++) if (isEdited(g)) refreshTime(g);
 
   // ---------------------------------------------------------------------------
@@ -459,6 +473,7 @@
       [outcome(g), t('tt.outcome', { t: PATIENTS.target[g] })],
       [t('days', { n: fmtObserved(g) }), t('tt.real')],
       [days(baseTime[m][g]), t('tt.pred', { model: MODELS[m] })],
+      [fmtPct(baseConf[m][g]), t('tt.conf', { tol: TOLERANCE })],
     ];
     if (editedSet.has(g)) rows.push([days(curTime[m][g]), t('tt.predEdit')]);
     tooltip.replaceChildren(
@@ -525,28 +540,33 @@
 
     $('prediction-sub').textContent = t('pred.sub', { id: PATIENTS.id[g], model: MODELS[m] });
     $('hero-label').textContent = t(edited ? 'hero.edited' : 'hero.dataset', { model: MODELS[m] });
-    $('hero-value').replaceChildren(fmtDays(cur.rmst), el('span', { class: 'unit', text: t('unit.days') }));
+    $('hero-value').replaceChildren(fmtDays(cur.time), el('span', { class: 'unit', text: t('unit.days') }));
     if (edited) {
-      const diff = cur.rmst - base.rmst;
-      const arrow = diff > 0.5 ? '▲' : diff < -0.5 ? '▼' : '';
+      const diff = cur.time - base.time;
+      const arrow = diff > 0 ? '▲' : diff < 0 ? '▼' : '';
       $('hero-delta').replaceChildren(
         el('b', { text: `${arrow} ${diff >= 0 ? '+' : '−'}${days(Math.abs(diff))}` }),
-        t('hero.delta', { v: fmtDays(base.rmst) }));
+        t('hero.delta', { v: fmtDays(base.time) }));
     } else {
       $('hero-delta').textContent = t('hero.hint');
     }
 
-    const median = (p) => (p.median === null ? t('fact.beyond', { tau: fmtDays(TAU) }) : days(p.median));
     const fact = (term, value, note) => el('div', {}, el('dt', { text: term }), el('dd', {}, value, el('small', { text: note })));
-    $('facts').replaceChildren(
+    const datasetOr = (format, value, note) => (edited ? t('fact.datasetValue', { v: format(value) }) : note);
+    $('facts').replaceChildren(...[
       fact(t('fact.time'), days(time), t('fact.outcome', { outcome: outcome(g), t: target })),
-      fact(t('fact.risk'), I18N.pct(cur.risk1y),
-        edited ? t('fact.datasetValue', { v: I18N.pct(base.risk1y) }) : t('fact.cohort', { v: I18N.pct(BUNDLE.meta.cohort_risk_1y) })),
+      // Уверенность модели, что ошибка прогноза не больше допуска: от неё зависит, можно ли полагаться на прогноз
+      fact(t('fact.conf', { tol: TOLERANCE }), fmtPct(cur.confidence),
+        t(cur.confidence >= CONFIDENT ? 'fact.confOk' : 'fact.confLow', { p: fmtPct(CONFIDENT) })),
+      fact(t('fact.risk'), fmtPct(cur.risk1y),
+        datasetOr(fmtPct, base.risk1y, t('fact.cohort', { v: fmtPct(BUNDLE.meta.cohort_risk_1y) }))),
+      fact(t('fact.rmst'), days(cur.rmst), datasetOr(days, base.rmst, t('fact.rmstNote'))),
       fact(t('fact.alive'), I18N.fixed(cur.sTau, 2),
-        edited ? t('fact.datasetValue', { v: I18N.fixed(base.sTau, 2) }) : t('fact.aliveNote', { tau: fmtDays(TAU) })),
-      fact(t('fact.median'), median(cur),
-        edited ? t('fact.datasetValue', { v: median(base) }) : t('fact.medianNote', { half: I18N.fixed(0.5, 1) })),
-    );
+        datasetOr((v) => I18N.fixed(v, 2), base.sTau, t('fact.aliveNote', { tau: fmtDays(TAU) }))),
+      // Двухэтапный алгоритм: в какую группу этап 1 отнёс пациента
+      cur.stage ? fact(t('fact.stage'), t(cur.stage.early ? 'fact.stageEarly' : 'fact.stageLate'),
+        t('fact.stageNote', { p: fmtPct(cur.stage.score), thr: fmtPct(cur.stage.threshold), days: fmtDays(cur.stage.days) })) : null,
+    ].filter(Boolean));
     // Если наблюдение закончилось до τ без смерти от ССЗ, min(T, τ) неизвестно — есть только нижняя граница
     const subKey = observed(g).exact ? 'hero.sub' : PATIENTS.death_any[g] ? 'hero.subOther' : 'hero.subCensored';
     $('hero-sub').textContent = t(subKey, { tau: fmtDays(TAU), v: fmtDays(Math.min(time, TAU)) });
@@ -565,13 +585,20 @@
       const tr = el('tr', { class: m === state.model ? 'active' : '' },
         el('td', {}, el('label', {}, radio, MODELS[m])),
         el('td', { text: I18N.fixed(BUNDLE.metrics[m].c_index, 3) }),
+        el('td', { text: fmtDays(BUNDLE.metrics[m].mae) }),
+        el('td', { text: fmtPct(BUNDLE.metrics[m].within_tolerance) }),
         el('td', { text: I18N.fixed(BUNDLE.metrics[m].brier_s_tau, 3) }),
-        el('td', { text: fmtDays(BUNDLE.metrics[m].calibration_rmst) }),
         el('td', { text: t('days.short', { n: fmtDays(baseTime[m][g]) }) }),
         el('td', { text: edited ? t('days.short', { n: fmtDays(curTime[m][g]) }) : '—' }));
       tr.addEventListener('click', (e) => { if (e.target !== radio) setModel(m); });
       return tr;
     }));
+    const r = BUNDLE.metrics[state.model];
+    $('models-note').textContent = t('models.note', {
+      tol: TOLERANCE, n: BUNDLE.meta.test_size, model: MODELS[state.model], within: fmtPct(r.within_tolerance),
+      p: fmtPct(CONFIDENT), share: fmtPct(r.confident_share), hit: fmtPct(r.confident_within_tolerance),
+      maeRmst: fmtDays(r.mae_rmst), mae: fmtDays(r.mae),
+    });
   }
 
   function renderMiniSummary() {
@@ -821,6 +848,7 @@
     ['real', 'table.real', (g) => observed(g).value],
     ['pred', 'table.pred', (g) => baseTime[state.model][g]],
     ['error', 'table.error', (g) => predictionError(g, baseTime[state.model][g])],
+    ['conf', 'table.conf', (g) => baseConf[state.model][g]],
     ['edited', 'table.edit', (g) => (editedSet.has(g) ? curTime[state.model][g] : -1)],
   ];
 
@@ -862,6 +890,7 @@
       el('td', { text: fmtObserved(g) }),
       el('td', { text: fmtDays(baseTime[m][g]) }),
       el('td', { text: fmtError(g, baseTime[m][g]) }),
+      el('td', { class: baseConf[m][g] >= CONFIDENT ? '' : 'low-conf', text: fmtPct(baseConf[m][g]) }),
       el('td', { text: editedSet.has(g) ? fmtDays(curTime[m][g]) : '—' }),
     );
   }
@@ -976,7 +1005,7 @@
   // Выгрузка выбранного датасета с изменениями и прогнозом времени всех моделей
   function downloadCsv() {
     const columns = BUNDLE.columns;
-    const header = ['', ...columns, 'edited', ...MODEL_KEYS.map((m) => `predicted_time_${m}`)];
+    const header = ['', ...columns, 'edited', ...MODEL_KEYS.flatMap((m) => [`predicted_time_${m}`, `p_error_le_${TOLERANCE}_${m}`])];
     const lines = [header.join(',')];
     for (const g of ds.rows) {
       const cells = [PATIENTS.id[g]];
@@ -985,7 +1014,7 @@
         else if (c === 'target') cells.push(PATIENTS.target[g]);
         else cells.push(state.values[g][FEATURES.indexOf(c)]);
       }
-      cells.push(editedSet.has(g) ? 1 : 0, ...MODEL_KEYS.map((m) => curTime[m][g].toFixed(1)));
+      cells.push(editedSet.has(g) ? 1 : 0, ...MODEL_KEYS.flatMap((m) => [curTime[m][g], curConf[m][g].toFixed(4)]));
       lines.push(cells.join(','));
     }
     const url = URL.createObjectURL(new Blob([lines.join('\n') + '\n'], { type: 'text/csv' }));
