@@ -1,6 +1,9 @@
 /*
  * Интерактивная карта пациентов: t-SNE, выбор и редактирование пациента, прогноз времени дожития.
  * Данные и параметры моделей — docs/survival_model.js (scripts/survival_time_predictor.py export).
+ *
+ * Пациенты — все строки med_dataset_cardio.xlsx (глобальный индекс g); balanced_dataset.csv — подмножество
+ * этих строк. Карта, таблица и номер строки относятся к выбранному датасету (локальный индекс i = ds.local[g]).
  */
 (function () {
   'use strict';
@@ -10,12 +13,15 @@
   const FEATURES = BUNDLE.features;
   const D = FEATURES.length;
   const PATIENTS = BUNDLE.patients;
-  const N = PATIENTS.id.length;
+  const NP = PATIENTS.id.length;
+  const DATASETS = BUNDLE.datasets;
   const TAU = BUNDLE.meta.tau;
   const MODELS = BUNDLE.meta.model_names;
   const MODEL_KEYS = Object.keys(MODELS);
   const DEFAULT_MODEL = 'xgb';
+  const DEFAULT_DATASET = 'balanced';
   const STORAGE_KEY = 'survival-explorer:v1';
+  const ITERATIONS = 1000;
 
   // Группа признака в редакторе и шаг ползунка (у категориальных — 1);
   // названия, единицы и значения категорий на двух языках — в i18n.js
@@ -52,6 +58,7 @@
     crea: { step: 1, group: 'labs' },
   };
   const GROUPS = ['demo', 'vitals', 'comorb', 'event', 'treat', 'labs'];
+  const SPLIT_KEYS = ['patient.excluded', 'patient.train', 'patient.test'];
 
   const { t } = I18N;
   const outcome = (target) => t(`outcome.${target}`);
@@ -103,43 +110,47 @@
   // Состояние: текущие (возможно, изменённые) значения признаков всех пациентов
   // ---------------------------------------------------------------------------
   const saved = loadSaved();
+  const indexById = new Map(PATIENTS.id.map((id, g) => [id, g]));
   const state = {
+    dataset: DATASETS[saved.dataset] ? saved.dataset : DEFAULT_DATASET,
     perplexity: Number.isFinite(saved.perplexity) ? clamp(Math.round(saved.perplexity), 2, 100) : 30,
     model: MODELS[saved.model] ? saved.model : DEFAULT_MODEL,
-    selected: Number.isInteger(saved.selected) && saved.selected >= 0 && saved.selected < N ? saved.selected : 0,
+    selected: indexById.has(saved.selectedId) ? indexById.get(saved.selectedId) : -1,
     hovered: -1,
     theme: saved.theme,
     values: PATIENTS.X.map((row) => row.slice()),
   };
-  const editedSet = new Set();
-  for (const [row, changes] of Object.entries(saved.edits || {})) {
-    const i = Number(row);
-    if (!Number.isInteger(i) || i < 0 || i >= N) continue;
+  // Изменения храним по ID пациента: он одинаков в обоих датасетах
+  for (const [id, changes] of Object.entries(saved.editsById || {})) {
+    const g = indexById.get(Number(id));
+    if (g === undefined) continue;
     for (const [feature, value] of Object.entries(changes)) {
       const k = FEATURES.indexOf(feature);
-      if (k >= 0 && Number.isFinite(value)) state.values[i][k] = value;
+      if (k >= 0 && Number.isFinite(value)) state.values[g][k] = value;
     }
   }
 
-  function isEdited(i) {
-    const x = state.values[i], original = PATIENTS.X[i];
+  function isEdited(g) {
+    const x = state.values[g], original = PATIENTS.X[g];
     for (let k = 0; k < D; k++) if (x[k] !== original[k]) return true;
     return false;
   }
-  const editedFeatures = (i) => FEATURES.filter((_, k) => state.values[i][k] !== PATIENTS.X[i][k]);
+  const editedFeatures = (g) => FEATURES.filter((_, k) => state.values[g][k] !== PATIENTS.X[g][k]);
+  const editedSet = new Set();
 
   let saveTimer = 0;
   function save() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
-      const edits = {};
-      for (const i of editedSet) {
-        edits[i] = {};
-        for (const f of editedFeatures(i)) edits[i][f] = state.values[i][FEATURES.indexOf(f)];
+      const editsById = {};
+      for (const g of editedSet) {
+        const changes = editsById[PATIENTS.id[g]] = {};
+        for (const f of editedFeatures(g)) changes[f] = state.values[g][FEATURES.indexOf(f)];
       }
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
-          perplexity: state.perplexity, model: state.model, selected: state.selected, theme: state.theme, lang: I18N.lang, edits,
+          dataset: state.dataset, perplexity: state.perplexity, model: state.model, selectedId: PATIENTS.id[state.selected],
+          theme: state.theme, lang: I18N.lang, editsById,
         }));
       } catch (e) { /* хранилище недоступно — состояние живёт только до перезагрузки */ }
     }, 200);
@@ -154,87 +165,114 @@
     baseTime[m] = Float64Array.from(PATIENTS.X, (x) => predictor.predict(x, m).rmst);
     curTime[m] = baseTime[m].slice();
   }
-  function refreshTime(i) {
-    const edited = isEdited(i);
-    if (edited) editedSet.add(i); else editedSet.delete(i);
-    for (const m of MODEL_KEYS) curTime[m][i] = edited ? predictor.predict(state.values[i], m).rmst : baseTime[m][i];
+  function refreshTime(g) {
+    const edited = isEdited(g);
+    if (edited) editedSet.add(g); else editedSet.delete(g);
+    for (const m of MODEL_KEYS) curTime[m][g] = edited ? predictor.predict(state.values[g], m).rmst : baseTime[m][g];
   }
-  for (let i = 0; i < N; i++) if (isEdited(i)) refreshTime(i);
+  for (let g = 0; g < NP; g++) if (isEdited(g)) refreshTime(g);
 
   // ---------------------------------------------------------------------------
-  // t-SNE: признаки стандартизуем по всем 408 пациентам
+  // Датасет: строки, стандартизация признаков для t-SNE и сама карта (кэшируется для каждого датасета)
   // ---------------------------------------------------------------------------
-  const mu = new Float64Array(D), sd = new Float64Array(D);
-  PATIENTS.X.forEach((x) => x.forEach((v, k) => { mu[k] += v / N; }));
-  PATIENTS.X.forEach((x) => x.forEach((v, k) => { sd[k] += (v - mu[k]) ** 2 / N; }));
-  for (let k = 0; k < D; k++) sd[k] = Math.sqrt(sd[k]) || 1;
-  const standardize = (x) => Float64Array.from(x, (v, k) => (v - mu[k]) / sd[k]);
-  const Z = new Float64Array(N * D);
-  PATIENTS.X.forEach((x, i) => Z.set(standardize(x), i * D));
+  const views = {};
+  function getView(key) {
+    if (views[key]) return views[key];
+    const rows = Int32Array.from(DATASETS[key].rows || PATIENTS.id.map((_, g) => g));
+    const n = rows.length;
+    const local = new Int32Array(NP).fill(-1);
+    rows.forEach((g, i) => { local[g] = i; });
+    const mu = new Float64Array(D), sd = new Float64Array(D);
+    for (const g of rows) PATIENTS.X[g].forEach((v, k) => { mu[k] += v / n; });
+    for (const g of rows) PATIENTS.X[g].forEach((v, k) => { sd[k] += (v - mu[k]) ** 2 / n; });
+    for (let k = 0; k < D; k++) sd[k] = Math.sqrt(sd[k]) || 1;
+    const standardize = (x) => Float64Array.from(x, (v, k) => (v - mu[k]) / sd[k]);
+    const Z = new Float64Array(n * D);
+    rows.forEach((g, i) => Z.set(standardize(PATIENTS.X[g]), i * D));
+    const counts = [0, 0];
+    for (const g of rows) counts[PATIENTS.target[g]]++;
+    views[key] = {
+      key, file: DATASETS[key].file, rows, n, local, standardize, Z, counts,
+      tsne: null, perplexity: null, kl: null,
+      pos: new Float64Array(2 * n),   // целевые положения точек
+      disp: new Float64Array(2 * n),  // отображаемые (анимируются к pos)
+      projOriginal: new Map(),        // проекция исходных значений пациента на карту
+    };
+    return views[key];
+  }
+  let ds = getView(state.dataset);
+  if (state.selected < 0 || ds.local[state.selected] < 0) state.selected = ds.rows[0];
 
-  let tsne = null;
-  let tsneRunning = false;
+  // ---------------------------------------------------------------------------
+  // t-SNE
+  // ---------------------------------------------------------------------------
+  let tsnePhase = 'idle'; // affinities → running → done
   let tsneToken = 0;
-  let tsneKL = null;
-  const pos = new Float64Array(2 * N);   // целевые положения точек
-  const disp = new Float64Array(2 * N);  // отображаемые (анимируются к pos)
-  const projOriginal = new Map();        // проекция исходных значений пациента на текущую карту
 
   function startTSNE() {
+    const view = ds;
     const token = ++tsneToken;
-    tsneRunning = true;
-    tsneKL = null;
-    projOriginal.clear();
+    tsnePhase = 'affinities';
+    view.perplexity = null;
+    view.kl = null;
+    view.projOriginal.clear();
     updateStatus();
-    requestAnimationFrame(() => {
+    // Сначала даём браузеру показать статус: расчёт сходств для 1506 пациентов занимает заметное время
+    requestAnimationFrame(() => setTimeout(() => {
       if (token !== tsneToken) return;
-      tsne = new TSNE(Z, N, D, { perplexity: state.perplexity });
+      view.tsne = new TSNE(view.Z, view.n, D, { perplexity: state.perplexity, iterations: ITERATIONS });
+      view.perplexity = state.perplexity;
+      tsnePhase = 'running';
       const frame = () => {
         if (token !== tsneToken) return;
-        const done = tsne.step(20);
-        pos.set(tsne.Y);
-        disp.set(tsne.Y);
-        computeView();
+        // Итерации — порциями примерно по 30 мс на кадр, чтобы страница не замирала на большом датасете
+        const start = performance.now();
+        let done;
+        do done = view.tsne.step(5); while (!done && performance.now() - start < 30);
+        view.pos.set(view.tsne.Y);
+        view.disp.set(view.tsne.Y);
+        computeTransform();
         drawMap();
         updateStatus();
         if (!done) {
           requestAnimationFrame(frame);
           return;
         }
-        tsneRunning = false;
-        tsneKL = tsne.kl();
-        for (const i of editedSet) placeEdited(i);
+        tsnePhase = 'done';
+        view.kl = view.tsne.kl();
+        for (const g of editedSet) placeEdited(g);
         updateStatus();
         animate();
       };
       frame();
-    });
+    }, 0));
   }
 
   // Положение изменённого пациента на карте. Проекция исходных значений (a) обычно немного
   // отличается от его места на карте; это смещение переносим на проекцию новых значений (b),
   // чтобы при малом изменении точка сдвигалась плавно от своего места. Чем дальше b от a,
   // тем меньше вес переноса: при сильном изменении точка встаёт ровно среди новых соседей.
-  function projectedPosition(i) {
-    const Y = tsne.Y;
-    if (!isEdited(i)) return [Y[2 * i], Y[2 * i + 1]];
-    let a = projOriginal.get(i);
+  function projectedPosition(g, i) {
+    const Y = ds.tsne.Y;
+    if (!isEdited(g)) return [Y[2 * i], Y[2 * i + 1]];
+    let a = ds.projOriginal.get(g);
     if (!a) {
-      a = tsne.project(Z.subarray(i * D, (i + 1) * D), i);
-      projOriginal.set(i, a);
+      a = ds.tsne.project(ds.Z.subarray(i * D, (i + 1) * D), i);
+      ds.projOriginal.set(g, a);
     }
-    const b = tsne.project(standardize(state.values[i]), i);
-    const bounds = tsne.bounds();
+    const b = ds.tsne.project(ds.standardize(state.values[g]), i);
+    const bounds = ds.tsne.bounds();
     const span = Math.max(bounds.x1 - bounds.x0, bounds.y1 - bounds.y0);
     const weight = Math.exp(-Math.hypot(b[0] - a[0], b[1] - a[1]) / (0.08 * span));
     return [b[0] + weight * (Y[2 * i] - a[0]), b[1] + weight * (Y[2 * i + 1] - a[1])];
   }
 
-  function placeEdited(i) {
-    if (!tsne || tsneRunning) return;
-    const [x, y] = projectedPosition(i);
-    pos[2 * i] = x;
-    pos[2 * i + 1] = y;
+  function placeEdited(g) {
+    const i = ds.local[g];
+    if (i < 0 || tsnePhase !== 'done') return;
+    const [x, y] = projectedPosition(g, i);
+    ds.pos[2 * i] = x;
+    ds.pos[2 * i + 1] = y;
   }
 
   let animating = false;
@@ -242,8 +280,9 @@
     if (animating) return;
     animating = true;
     const tick = () => {
+      const { pos, disp } = ds;
       let moving = false;
-      for (let k = 0; k < 2 * N; k++) {
+      for (let k = 0; k < pos.length; k++) {
         const diff = pos[k] - disp[k];
         if (Math.abs(diff) > 1e-3) {
           disp[k] += diff * 0.2;
@@ -263,7 +302,7 @@
   const canvas = $('map');
   const ctx = canvas.getContext('2d');
   const tooltip = $('map-tooltip');
-  let view = { scale: 1, ox: 0, oy: 0, w: 0, h: 0 };
+  const screen = { scale: 1, ox: 0, oy: 0, w: 0, h: 0 };
   let colors = {};
 
   function readColors() {
@@ -280,27 +319,27 @@
   function resizeCanvas() {
     const rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    view.w = rect.width;
-    view.h = rect.height;
+    screen.w = rect.width;
+    screen.h = rect.height;
     canvas.width = Math.round(rect.width * dpr);
     canvas.height = Math.round(rect.height * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    computeView();
+    computeTransform();
     drawMap();
   }
 
   // Масштаб одинаковый по обеим осям: расстояния на карте t-SNE изотропны
-  function computeView() {
-    if (!tsne) return;
-    const b = tsne.bounds();
+  function computeTransform() {
+    if (!ds.tsne) return;
+    const b = ds.tsne.bounds();
     const padData = 0.06, padPx = 16;
     const bw = (b.x1 - b.x0) * (1 + 2 * padData) || 1, bh = (b.y1 - b.y0) * (1 + 2 * padData) || 1;
-    view.scale = Math.min((view.w - 2 * padPx) / bw, (view.h - 2 * padPx) / bh);
-    view.ox = view.w / 2 - ((b.x0 + b.x1) / 2) * view.scale;
-    view.oy = view.h / 2 + ((b.y0 + b.y1) / 2) * view.scale;
+    screen.scale = Math.min((screen.w - 2 * padPx) / bw, (screen.h - 2 * padPx) / bh);
+    screen.ox = screen.w / 2 - ((b.x0 + b.x1) / 2) * screen.scale;
+    screen.oy = screen.h / 2 + ((b.y0 + b.y1) / 2) * screen.scale;
   }
-  const sx = (x) => view.ox + x * view.scale;
-  const sy = (y) => view.oy - y * view.scale;
+  const sx = (x) => screen.ox + x * screen.scale;
+  const sy = (y) => screen.oy - y * screen.scale;
 
   function circle(x, y, r) {
     ctx.beginPath();
@@ -308,23 +347,28 @@
   }
 
   function drawMap() {
-    ctx.clearRect(0, 0, view.w, view.h);
-    if (!tsne) return;
-    const Y = tsne.Y;
+    ctx.clearRect(0, 0, screen.w, screen.h);
+    if (!ds.tsne) return;
+    const { rows, n, disp } = ds;
+    const Y = ds.tsne.Y;
+    const r = n > 800 ? 3 : 4;
 
     // Пациенты; у каждой точки кольцо цвета фона, чтобы перекрывающиеся точки читались
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = n > 800 ? 1 : 1.5;
     ctx.strokeStyle = colors.surface;
-    for (let i = 0; i < N; i++) {
-      if (editedSet.has(i)) continue;
-      circle(sx(disp[2 * i]), sy(disp[2 * i + 1]), 4);
-      ctx.fillStyle = colors.t[PATIENTS.target[i]];
+    for (let i = 0; i < n; i++) {
+      const g = rows[i];
+      if (editedSet.has(g)) continue;
+      circle(sx(disp[2 * i]), sy(disp[2 * i + 1]), r);
+      ctx.fillStyle = colors.t[PATIENTS.target[g]];
       ctx.fill();
       ctx.stroke();
     }
 
     // Изменённые пациенты: исходное место (пустой кружок) → линия → новое положение
-    for (const i of editedSet) {
+    for (const g of editedSet) {
+      const i = ds.local[g];
+      if (i < 0) continue;
       const x0 = sx(Y[2 * i]), y0 = sy(Y[2 * i + 1]);
       const x1 = sx(disp[2 * i]), y1 = sy(disp[2 * i + 1]);
       ctx.beginPath();
@@ -343,20 +387,21 @@
       ctx.fillStyle = colors.edit;
       ctx.fill();
       circle(x1, y1, 4);
-      ctx.fillStyle = colors.t[PATIENTS.target[i]];
+      ctx.fillStyle = colors.t[PATIENTS.target[g]];
       ctx.fill();
     }
 
-    if (state.hovered >= 0 && state.hovered !== state.selected) {
-      const i = state.hovered;
-      circle(sx(disp[2 * i]), sy(disp[2 * i + 1]), 7.5);
+    const h = ds.local[state.hovered] ?? -1;
+    if (state.hovered >= 0 && h >= 0 && state.hovered !== state.selected) {
+      circle(sx(disp[2 * h]), sy(disp[2 * h + 1]), 7.5);
       ctx.strokeStyle = colors.ink2;
       ctx.lineWidth = 1.5;
       ctx.stroke();
     }
 
     // Выбранный пациент — обведён, с подписью
-    const s = state.selected;
+    const s = ds.local[state.selected];
+    if (s < 0) return;
     const x = sx(disp[2 * s]), y = sy(disp[2 * s + 1]);
     circle(x, y, 10);
     ctx.strokeStyle = colors.surface;
@@ -365,10 +410,10 @@
     ctx.strokeStyle = colors.ink;
     ctx.lineWidth = 2;
     ctx.stroke();
-    const label = `ID ${PATIENTS.id[s]}`;
+    const label = `ID ${PATIENTS.id[state.selected]}`;
     ctx.font = '600 12px system-ui, -apple-system, "Segoe UI", sans-serif';
     const width = ctx.measureText(label).width;
-    const lx = x + 14 + width > view.w ? x - 14 - width : x + 14;
+    const lx = x + 14 + width > screen.w ? x - 14 - width : x + 14;
     const ly = y - 12 < 12 ? y + 22 : y - 12;
     ctx.lineJoin = 'round';
     ctx.lineWidth = 4;
@@ -378,35 +423,37 @@
     ctx.fillText(label, lx, ly);
   }
 
-  // Ближайшая к указателю точка в радиусе 16 px
+  // Ближайший к указателю пациент в радиусе 16 px (глобальный индекс или −1)
   function nearest(px, py) {
+    const { rows, n, disp } = ds;
     let best = -1, bestD = 16 * 16;
-    for (let i = 0; i < N; i++) {
+    for (let i = 0; i < n; i++) {
       const dx = sx(disp[2 * i]) - px, dy = sy(disp[2 * i + 1]) - py;
       const d2 = dx * dx + dy * dy;
-      if (d2 < bestD) { bestD = d2; best = i; }
+      if (d2 < bestD) { bestD = d2; best = rows[i]; }
     }
     return best;
   }
 
-  function showTooltip(i, px, py) {
+  function showTooltip(g, px, py) {
     const m = state.model;
     const rows = [
-      [days(PATIENTS.time[i]), t('tt.time')],
-      [outcome(PATIENTS.target[i]), t('tt.outcome', { t: PATIENTS.target[i] })],
-      [days(baseTime[m][i]), t('tt.pred', { model: MODELS[m] })],
+      [days(PATIENTS.time[g]), t('tt.time')],
+      [outcome(PATIENTS.target[g]), t('tt.outcome', { t: PATIENTS.target[g] })],
+      [days(baseTime[m][g]), t('tt.pred', { model: MODELS[m] })],
     ];
-    if (editedSet.has(i)) rows.push([days(curTime[m][i]), t('tt.predEdit')]);
+    if (editedSet.has(g)) rows.push([days(curTime[m][g]), t('tt.predEdit')]);
+    const split = PATIENTS.split[g];
     tooltip.replaceChildren(
       el('div', { class: 'tt-title' },
-        el('span', { class: `dot t${PATIENTS.target[i]}` }),
-        t('tt.title', { id: PATIENTS.id[i], row: i }) + (PATIENTS.test[i] ? t('tt.heldOut') : '')),
+        el('span', { class: `dot t${PATIENTS.target[g]}` }),
+        t('tt.title', { id: PATIENTS.id[g], row: ds.local[g] }) + (split === 2 ? t('tt.heldOut') : split === 0 ? t('tt.excluded') : '')),
       ...rows.map(([value, label]) => el('div', { class: 'tt-row' }, el('b', { text: value }), el('span', { text: label }))),
     );
     tooltip.style.display = 'block';
     const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
-    tooltip.style.left = `${px + 14 + tw > view.w ? px - 14 - tw : px + 14}px`;
-    tooltip.style.top = `${clamp(py - th / 2, 0, view.h - th)}px`;
+    tooltip.style.left = `${px + 14 + tw > screen.w ? px - 14 - tw : px + 14}px`;
+    tooltip.style.top = `${clamp(py - th / 2, 0, screen.h - th)}px`;
   }
 
   function hideTooltip() {
@@ -416,13 +463,13 @@
   canvas.addEventListener('pointermove', (e) => {
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left, py = e.clientY - rect.top;
-    const i = nearest(px, py);
-    if (i !== state.hovered) {
-      state.hovered = i;
+    const g = nearest(px, py);
+    if (g !== state.hovered) {
+      state.hovered = g;
       drawMap();
     }
-    canvas.style.cursor = i >= 0 ? 'pointer' : 'crosshair';
-    if (i >= 0) showTooltip(i, px, py); else hideTooltip();
+    canvas.style.cursor = g >= 0 ? 'pointer' : 'crosshair';
+    if (g >= 0) showTooltip(g, px, py); else hideTooltip();
   });
   canvas.addEventListener('pointerleave', () => {
     state.hovered = -1;
@@ -431,34 +478,35 @@
   });
   canvas.addEventListener('click', (e) => {
     const rect = canvas.getBoundingClientRect();
-    const i = nearest(e.clientX - rect.left, e.clientY - rect.top);
-    if (i >= 0) selectPatient(i);
+    const g = nearest(e.clientX - rect.left, e.clientY - rect.top);
+    if (g >= 0) selectPatient(g);
   });
   canvas.addEventListener('keydown', (e) => {
     const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
     if (!step) return;
     e.preventDefault();
-    selectPatient((state.selected + step + N) % N);
+    stepPatient(step);
   });
 
   function updateStatus() {
-    const text = tsneRunning
-      ? t('status.running', { i: tsne ? tsne.iter : 0, p: state.perplexity })
-      : t('status.done', { p: state.perplexity, kl: tsneKL === null ? '…' : I18N.fixed(tsneKL, 3), n: editedSet.size });
-    $('tsne-status').textContent = text;
+    const p = state.perplexity;
+    $('tsne-status').textContent =
+      tsnePhase === 'affinities' ? t('status.affinities', { n: fmtDays(ds.n) })
+        : tsnePhase === 'running' ? t('status.running', { i: ds.tsne.iter, p })
+          : t('status.done', { p, kl: ds.kl === null ? '…' : I18N.fixed(ds.kl, 3), n: editedSet.size });
   }
 
   // ---------------------------------------------------------------------------
   // Прогноз для выбранного пациента: карточка, функция выживаемости, таблица моделей
   // ---------------------------------------------------------------------------
   function renderPrediction() {
-    const i = state.selected, m = state.model;
-    const edited = editedSet.has(i);
-    const base = predictor.predict(PATIENTS.X[i], m);
-    const cur = edited ? predictor.predict(state.values[i], m) : base;
-    const time = PATIENTS.time[i], target = PATIENTS.target[i];
+    const g = state.selected, m = state.model;
+    const edited = editedSet.has(g);
+    const base = predictor.predict(PATIENTS.X[g], m);
+    const cur = edited ? predictor.predict(state.values[g], m) : base;
+    const time = PATIENTS.time[g], target = PATIENTS.target[g];
 
-    $('prediction-sub').textContent = t('pred.sub', { id: PATIENTS.id[i], model: MODELS[m] });
+    $('prediction-sub').textContent = t('pred.sub', { id: PATIENTS.id[g], model: MODELS[m] });
     $('hero-label').textContent = t(edited ? 'hero.edited' : 'hero.dataset', { model: MODELS[m] });
     $('hero-value').replaceChildren(fmtDays(cur.rmst), el('span', { class: 'unit', text: t('unit.days') }));
     if (edited) {
@@ -480,7 +528,9 @@
       fact(t('fact.median'), median(cur),
         edited ? t('fact.datasetValue', { v: median(base) }) : t('fact.medianNote', { half: I18N.fixed(0.5, 1) })),
     );
-    $('hero-sub').textContent = t('hero.sub', { tau: fmtDays(TAU), v: fmtDays(Math.min(time, TAU)) });
+    // У цензурированного до τ пациента min(T, τ) неизвестно — есть только нижняя граница
+    const censoredEarly = target === 0 && time < TAU;
+    $('hero-sub').textContent = t(censoredEarly ? 'hero.subCensored' : 'hero.sub', { tau: fmtDays(TAU), v: fmtDays(Math.min(time, TAU)) });
 
     renderSurvivalChart(base.curve, edited ? cur.curve : null, time, target);
     renderModelTable();
@@ -488,8 +538,8 @@
   }
 
   function renderModelTable() {
-    const i = state.selected;
-    const edited = editedSet.has(i);
+    const g = state.selected;
+    const edited = editedSet.has(g);
     $('model-table').tBodies[0].replaceChildren(...MODEL_KEYS.map((m) => {
       const radio = el('input', { type: 'radio', name: 'model-radio', value: m, checked: m === state.model });
       radio.addEventListener('change', () => setModel(m));
@@ -497,21 +547,21 @@
         el('td', {}, el('label', {}, radio, MODELS[m])),
         el('td', { text: I18N.fixed(BUNDLE.metrics[m].c_index, 3) }),
         el('td', { text: I18N.fixed(BUNDLE.metrics[m].brier_s_tau, 3) }),
-        el('td', { text: t('days.short', { n: fmtDays(baseTime[m][i]) }) }),
-        el('td', { text: edited ? t('days.short', { n: fmtDays(curTime[m][i]) }) : '—' }));
+        el('td', { text: t('days.short', { n: fmtDays(baseTime[m][g]) }) }),
+        el('td', { text: edited ? t('days.short', { n: fmtDays(curTime[m][g]) }) : '—' }));
       tr.addEventListener('click', (e) => { if (e.target !== radio) setModel(m); });
       return tr;
     }));
   }
 
   function renderMiniSummary() {
-    const i = state.selected, m = state.model;
-    const edited = editedSet.has(i);
+    const g = state.selected, m = state.model;
+    const edited = editedSet.has(g);
     const predicted = edited
-      ? [el('b', { text: fmtDays(baseTime[m][i]) }), ' → ', el('b', { text: days(curTime[m][i]) })]
-      : [el('b', { text: days(baseTime[m][i]) })];
+      ? [el('b', { text: fmtDays(baseTime[m][g]) }), ' → ', el('b', { text: days(curTime[m][g]) })]
+      : [el('b', { text: days(baseTime[m][g]) })];
     $('mini-summary').replaceChildren(
-      el('span', {}, t('mini.time'), el('b', { text: days(PATIENTS.time[i]) })),
+      el('span', {}, t('mini.time'), el('b', { text: days(PATIENTS.time[g]) })),
       el('span', {}, t('mini.pred', { model: MODELS[m] }), ...predicted),
     );
   }
@@ -554,7 +604,7 @@
     root.append(svg('path', { class: 'curve base', d: path(baseCurve) }));
     if (editCurve) root.append(svg('path', { class: 'curve edit', d: path(editCurve) }));
 
-    // Время из датасета: смерть до τ — вертикальная линия, иначе подпись у правого края.
+    // Время из датасета: событие или цензурирование до τ — вертикальная линия, иначе подпись у правого края.
     // Подпись ставим сверху или снизу — туда, где в этот момент нет кривых
     const at = Math.min(time, TAU - 1);
     const curvesAt = [baseCurve[at], ...(editCurve ? [editCurve[at]] : [])];
@@ -631,12 +681,13 @@
   // ---------------------------------------------------------------------------
   // Редактор параметров
   // ---------------------------------------------------------------------------
+  // Диапазон ползунков — по полному датасету, чтобы он не менялся при переключении датасета
   const ranges = FEATURES.map((_, k) => {
     let lo = Infinity, hi = -Infinity;
     for (const x of PATIENTS.X) { lo = Math.min(lo, x[k]); hi = Math.max(hi, x[k]); }
     return [lo, hi];
   });
-  const inputs = {}; // feature → { row, range, num, orig }
+  const inputs = {}; // feature → { row, range, num, reset, orig }
 
   function encoding(text) {
     if (text.levels) return text.levels.map((name, v) => `${v} ${name}`).join(', ');
@@ -702,10 +753,10 @@
 
   // Синхронизировать поля с выбранным пациентом; поле, в котором сейчас печатают, не трогаем
   function syncEditor() {
-    const i = state.selected;
+    const g = state.selected;
     FEATURES.forEach((f, k) => {
       const { row, range, num, reset, orig } = inputs[f];
-      const v = state.values[i][k], o = PATIENTS.X[i][k];
+      const v = state.values[g][k], o = PATIENTS.X[g][k];
       const { levels } = I18N.feature(f);
       if (document.activeElement !== num) num.value = fmtValue(v);
       if (document.activeElement !== range) range.value = v;
@@ -718,38 +769,40 @@
   }
 
   function renderPatientBar() {
-    const i = state.selected;
+    const g = state.selected;
+    const i = ds.local[g];
     const idInput = $('patient-id');
-    if (document.activeElement !== idInput) idInput.value = PATIENTS.id[i];
+    if (document.activeElement !== idInput) idInput.value = PATIENTS.id[g];
+    $('patient-row').max = ds.n - 1;
     $('patient-row').value = i;
-    $('patient-row-out').textContent = t('patient.rowOf', { i, max: N - 1 });
-    const nEdited = editedSet.has(i) ? editedFeatures(i).length : 0;
+    $('patient-row-out').textContent = t('patient.rowOf', { i: fmtDays(i), max: fmtDays(ds.n - 1) });
+    const nEdited = editedSet.has(g) ? editedFeatures(g).length : 0;
     const resetBtn = el('button', { type: 'button', disabled: nEdited === 0, text: t('patient.reset') });
-    resetBtn.addEventListener('click', () => resetPatient(i));
+    resetBtn.addEventListener('click', () => resetPatient(g));
     $('patient-badges').replaceChildren(...[
-      el('span', { class: 'badge' }, el('span', { class: `dot t${PATIENTS.target[i]}` }),
-        t('fact.outcome', { outcome: outcome(PATIENTS.target[i]), t: PATIENTS.target[i] })),
-      el('span', { class: 'badge', text: t(PATIENTS.test[i] ? 'patient.test' : 'patient.train') }),
+      el('span', { class: 'badge' }, el('span', { class: `dot t${PATIENTS.target[g]}` }),
+        t('fact.outcome', { outcome: outcome(PATIENTS.target[g]), t: PATIENTS.target[g] })),
+      el('span', { class: 'badge', text: t(SPLIT_KEYS[PATIENTS.split[g]]) }),
       nEdited ? el('span', { class: 'badge' }, el('span', { class: 'ring-sm' }), t('patient.edited', { n: nEdited })) : null,
       resetBtn,
     ].filter(Boolean));
   }
 
   // ---------------------------------------------------------------------------
-  // Табличное представление
+  // Табличное представление выбранного датасета
   // ---------------------------------------------------------------------------
-  const tableRows = [];
+  let tableRows = []; // по локальному индексу
   const sortState = { key: 'row', dir: 1 };
   const COLUMNS = [
-    ['row', 'table.row', (i) => i],
-    ['id', 'table.id', (i) => PATIENTS.id[i]],
-    ['target', 'table.outcome', (i) => PATIENTS.target[i]],
-    ['time', 'table.time', (i) => PATIENTS.time[i]],
-    ['pred', 'table.pred', (i) => baseTime[state.model][i]],
-    ['edited', 'table.edit', (i) => (editedSet.has(i) ? curTime[state.model][i] : -1)],
+    ['row', 'table.row', (g) => ds.local[g]],
+    ['id', 'table.id', (g) => PATIENTS.id[g]],
+    ['target', 'table.outcome', (g) => PATIENTS.target[g]],
+    ['time', 'table.time', (g) => PATIENTS.time[g]],
+    ['pred', 'table.pred', (g) => baseTime[state.model][g]],
+    ['edited', 'table.edit', (g) => (editedSet.has(g) ? curTime[state.model][g] : -1)],
   ];
 
-  function buildTable() {
+  function buildTableHead() {
     const head = $('patients-table').tHead.rows[0];
     for (const [key] of COLUMNS) {
       const button = el('button', { type: 'button' });
@@ -760,35 +813,39 @@
       });
       head.append(el('th', { scope: 'col' }, button));
     }
-    const body = $('patients-table').tBodies[0];
-    for (let i = 0; i < N; i++) {
+  }
+
+  function buildTableBody() {
+    tableRows = Array.from(ds.rows, (g) => {
       const tr = el('tr', { tabindex: 0 });
-      tr.addEventListener('click', () => selectPatient(i));
-      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') selectPatient(i); });
-      tableRows.push(tr);
-      updateTableRow(i);
-      body.append(tr);
-    }
+      tr.addEventListener('click', () => selectPatient(g));
+      tr.addEventListener('keydown', (e) => { if (e.key === 'Enter') selectPatient(g); });
+      return tr;
+    });
+    for (const g of ds.rows) updateTableRow(g);
+    $('patients-table').tBodies[0].replaceChildren(...tableRows);
     sortTable();
   }
 
-  function updateTableRow(i) {
+  function updateTableRow(g) {
+    const i = ds.local[g];
+    if (i < 0 || !tableRows[i]) return;
     const m = state.model;
-    tableRows[i].classList.toggle('active', i === state.selected);
+    tableRows[i].classList.toggle('active', g === state.selected);
     tableRows[i].replaceChildren(
       el('td', { text: i }),
-      el('td', { text: PATIENTS.id[i] }),
-      el('td', {}, el('span', { class: 'outcome' }, el('span', { class: `dot t${PATIENTS.target[i]}` }), outcome(PATIENTS.target[i]))),
-      el('td', { text: fmtDays(PATIENTS.time[i]) }),
-      el('td', { text: fmtDays(baseTime[m][i]) }),
-      el('td', { text: editedSet.has(i) ? fmtDays(curTime[m][i]) : '—' }),
+      el('td', { text: PATIENTS.id[g] }),
+      el('td', {}, el('span', { class: 'outcome' }, el('span', { class: `dot t${PATIENTS.target[g]}` }), outcome(PATIENTS.target[g]))),
+      el('td', { text: fmtDays(PATIENTS.time[g]) }),
+      el('td', { text: fmtDays(baseTime[m][g]) }),
+      el('td', { text: editedSet.has(g) ? fmtDays(curTime[m][g]) : '—' }),
     );
   }
 
   function sortTable() {
     const value = COLUMNS.find(([key]) => key === sortState.key)[2];
-    const order = [...Array(N).keys()].sort((a, b) => (value(a) - value(b)) * sortState.dir || a - b);
-    $('patients-table').tBodies[0].append(...order.map((i) => tableRows[i]));
+    const order = Array.from(ds.rows).sort((a, b) => (value(a) - value(b)) * sortState.dir || ds.local[a] - ds.local[b]);
+    $('patients-table').tBodies[0].append(...order.map((g) => tableRows[ds.local[g]]));
     [...$('patients-table').tHead.rows[0].cells].forEach((th, c) => {
       const sorted = COLUMNS[c][0] === sortState.key;
       th.setAttribute('aria-sort', sorted ? (sortState.dir > 0 ? 'ascending' : 'descending') : 'none');
@@ -799,12 +856,12 @@
   // ---------------------------------------------------------------------------
   // Действия
   // ---------------------------------------------------------------------------
-  function selectPatient(i) {
+  function selectPatient(g) {
     const previous = state.selected;
-    state.selected = i;
+    state.selected = g;
     $('patient-msg').textContent = '';
     updateTableRow(previous);
-    updateTableRow(i);
+    updateTableRow(g);
     syncEditor();
     renderPatientBar();
     renderPrediction();
@@ -812,11 +869,16 @@
     save();
   }
 
-  function patientChanged(i) {
-    refreshTime(i);
-    placeEdited(i);
+  function stepPatient(step) {
+    const i = ds.local[state.selected];
+    selectPatient(ds.rows[(i + step + ds.n) % ds.n]);
+  }
+
+  function patientChanged(g) {
+    refreshTime(g);
+    placeEdited(g);
     animate();
-    updateTableRow(i);
+    updateTableRow(g);
     syncEditor();
     renderPatientBar();
     renderPrediction();
@@ -830,22 +892,22 @@
     patientChanged(state.selected);
   }
 
-  function resetPatient(i) {
-    state.values[i] = PATIENTS.X[i].slice();
-    patientChanged(i);
+  function resetPatient(g) {
+    state.values[g] = PATIENTS.X[g].slice();
+    patientChanged(g);
   }
 
   function resetAll() {
-    for (const i of [...editedSet]) {
-      state.values[i] = PATIENTS.X[i].slice();
-      patientChanged(i);
+    for (const g of [...editedSet]) {
+      state.values[g] = PATIENTS.X[g].slice();
+      patientChanged(g);
     }
   }
 
   function setModel(m) {
     state.model = m;
     $('model-select').value = m;
-    for (let i = 0; i < N; i++) updateTableRow(i);
+    for (const g of ds.rows) updateTableRow(g);
     sortTable();
     renderPrediction();
     save();
@@ -860,23 +922,50 @@
     setPerplexity.timer = setTimeout(startTSNE, 120);
   }
 
-  // Выгрузка датасета с изменениями и прогнозом времени всех моделей
+  function setDataset(key) {
+    if (key === state.dataset || !DATASETS[key]) return;
+    // Недосчитанная карта прежнего датасета больше не нужна
+    if (tsnePhase !== 'done') ds.perplexity = null;
+    tsneToken++;
+    state.dataset = key;
+    ds = getView(key);
+    $('dataset-select').value = key;
+    if (ds.local[state.selected] < 0) state.selected = ds.rows[0];
+    state.hovered = -1;
+    hideTooltip();
+    buildTableBody();
+    renderTexts();
+    if (ds.tsne && ds.perplexity === state.perplexity) {
+      // Карта этого датасета уже посчитана — показываем её, расставив изменённых пациентов
+      tsnePhase = 'done';
+      ds.pos.set(ds.tsne.Y);
+      for (const g of editedSet) placeEdited(g);
+      ds.disp.set(ds.pos);
+      computeTransform();
+      updateStatus();
+    } else {
+      startTSNE();
+    }
+    selectPatient(state.selected);
+  }
+
+  // Выгрузка выбранного датасета с изменениями и прогнозом времени всех моделей
   function downloadCsv() {
     const columns = BUNDLE.columns;
     const header = ['', ...columns, 'edited', ...MODEL_KEYS.map((m) => `predicted_time_${m}`)];
     const lines = [header.join(',')];
-    for (let i = 0; i < N; i++) {
-      const cells = [PATIENTS.id[i]];
+    for (const g of ds.rows) {
+      const cells = [PATIENTS.id[g]];
       for (const c of columns) {
-        if (c === 'time') cells.push(PATIENTS.time[i]);
-        else if (c === 'target') cells.push(PATIENTS.target[i]);
-        else cells.push(state.values[i][FEATURES.indexOf(c)]);
+        if (c === 'time') cells.push(PATIENTS.time[g]);
+        else if (c === 'target') cells.push(PATIENTS.target[g]);
+        else cells.push(state.values[g][FEATURES.indexOf(c)]);
       }
-      cells.push(editedSet.has(i) ? 1 : 0, ...MODEL_KEYS.map((m) => curTime[m][i].toFixed(1)));
+      cells.push(editedSet.has(g) ? 1 : 0, ...MODEL_KEYS.map((m) => curTime[m][g].toFixed(1)));
       lines.push(cells.join(','));
     }
     const url = URL.createObjectURL(new Blob([lines.join('\n') + '\n'], { type: 'text/csv' }));
-    const a = el('a', { href: url, download: 'balanced_dataset_edited.csv' });
+    const a = el('a', { href: url, download: `${ds.file.replace(/\.\w+$/, '')}_edited.csv` });
     document.body.append(a);
     a.click();
     a.remove();
@@ -895,28 +984,35 @@
   }
 
   // Тексты, которые собирает сам скрипт (статичные переводит I18N.applyStatic)
-  const counts = [0, 0];
-  PATIENTS.target.forEach((target) => counts[target]++);
   function renderTexts() {
-    $('legend-t0').textContent = t('legend.t0', { n: counts[0] });
-    $('legend-t1').textContent = t('legend.t1', { n: counts[1] });
+    $('legend-t0').textContent = t('legend.t0', { n: fmtDays(ds.counts[0]) });
+    $('legend-t1').textContent = t('legend.t1', { n: fmtDays(ds.counts[1]) });
     $('generated').textContent = t('footer.generated', { date: BUNDLE.meta.generated });
     $('theme-toggle').setAttribute('aria-label', t(effectiveDark() ? 'theme.toLight' : 'theme.toDark'));
+    for (const option of $('dataset-select').options) {
+      option.textContent = t(`dataset.${option.value}`, { n: fmtDays(getView(option.value).n) });
+    }
     updateStatus();
   }
 
   function setLang(lang) {
     if (lang === I18N.lang) return;
     I18N.setLang(lang);
+    // Ссылка в адресной строке ведёт на ту же языковую версию
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set('lang', lang);
+      window.history.replaceState(null, '', url);
+    } catch (e) { /* например, file:// — адрес не меняем */ }
     $('patient-msg').textContent = '';
     renderTexts();
     buildEditor();
     syncEditor();
     renderPatientBar();
     renderPrediction();
-    for (let i = 0; i < N; i++) updateTableRow(i);
+    for (const g of ds.rows) updateTableRow(g);
     sortTable();
-    if (state.hovered >= 0) hideTooltip();
+    hideTooltip();
     save();
   }
 
@@ -924,6 +1020,10 @@
   // Инициализация
   // ---------------------------------------------------------------------------
   function init() {
+    const datasetSelect = $('dataset-select');
+    for (const key of Object.keys(DATASETS)) datasetSelect.append(el('option', { value: key }));
+    datasetSelect.value = state.dataset;
+    datasetSelect.addEventListener('change', () => setDataset(datasetSelect.value));
     renderTexts();
     document.querySelectorAll('[data-lang]').forEach((button) => {
       button.addEventListener('click', () => setLang(button.dataset.lang));
@@ -943,13 +1043,13 @@
     });
     $('perplexity-num').addEventListener('blur', (e) => { e.target.value = state.perplexity; });
 
-    $('patient-row').max = N - 1;
-    $('patient-row').addEventListener('input', (e) => selectPatient(+e.target.value));
-    $('prev-patient').addEventListener('click', () => selectPatient((state.selected - 1 + N) % N));
-    $('next-patient').addEventListener('click', () => selectPatient((state.selected + 1) % N));
+    $('patient-row').addEventListener('input', (e) => selectPatient(ds.rows[+e.target.value]));
+    $('prev-patient').addEventListener('click', () => stepPatient(-1));
+    $('next-patient').addEventListener('click', () => stepPatient(1));
     $('patient-id').addEventListener('change', (e) => {
-      const i = PATIENTS.id.indexOf(Number(e.target.value));
-      if (i >= 0) selectPatient(i);
+      const g = indexById.get(Number(e.target.value));
+      if (g !== undefined && ds.local[g] >= 0) selectPatient(g);
+      else if (g !== undefined) $('patient-msg').textContent = t('patient.notInDataset', { id: e.target.value, file: ds.file });
       else $('patient-msg').textContent = t('patient.notFound', { id: e.target.value });
     });
 
@@ -966,7 +1066,8 @@
     window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', themeChanged);
 
     buildEditor();
-    buildTable();
+    buildTableHead();
+    buildTableBody();
     readColors();
     themeChanged();
     selectPatient(state.selected);

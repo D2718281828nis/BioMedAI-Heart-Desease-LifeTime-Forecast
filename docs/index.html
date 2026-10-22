@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -117,6 +117,8 @@
   }
   .control { display: flex; align-items: center; gap: 8px; }
   .control > label { color: var(--ink-2); font-size: 13px; white-space: nowrap; }
+  .control { min-width: 0; max-width: 100%; }
+  .control select { min-width: 0; max-width: 100%; }
   #perplexity-range { width: 160px; }
   #perplexity-num { width: 64px; }
   .toolbar .spacer { flex: 1; }
@@ -281,7 +283,7 @@
 <div class="page">
   <header class="top">
     <div>
-      <h1 data-i18n="h1">Survival time explorer</h1>
+      <h1 data-i18n="h1"></h1>
       <p class="lede" data-i18n-html="lede"></p>
     </div>
     <div class="top-actions">
@@ -296,6 +298,10 @@
   </header>
 
   <div class="toolbar" role="group" data-i18n-aria-label="toolbar.aria">
+    <div class="control">
+      <label for="dataset-select" data-i18n="dataset.label"></label>
+      <select id="dataset-select"></select>
+    </div>
     <div class="control">
       <label for="perplexity-range" data-i18n="perplexity.label"></label>
       <input id="perplexity-range" type="range" min="2" max="100" step="1">

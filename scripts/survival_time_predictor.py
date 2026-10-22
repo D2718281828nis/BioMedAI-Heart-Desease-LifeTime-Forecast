@@ -1,19 +1,21 @@
 """Прогноз времени дожития по подходу Survival-function-analysys.ipynb.
 
 Скрипт воспроизводит модели выживаемости из ноутбука (CoxPH, Weibull AFT, XGBoost Cox,
-полносвязная и резервуарная нейросети с калибровкой Кокса) на balanced_dataset.csv
+полносвязная и резервуарная нейросети с калибровкой Кокса) на df_balanced (= balanced_dataset.csv)
 с тем же разбиением, стандартизацией и гиперпараметрами, и считает для пациента
 функцию выживаемости S(t) на сетке 0..τ−1 и прогноз времени RMST(τ) = ∫₀^τ S(t) dt.
+Прогноз доступен для всех 1506 пациентов med_dataset_cardio.xlsx.
 
 Команды:
-  export   обучить модели как в ноутбуке и записать параметры в docs/survival_model.js
+  export   обучить модели как в ноутбуке и записать параметры и оба датасета в docs/survival_model.js
            (их использует интерактивная страница docs/index.html — тот же расчёт на JavaScript)
-  predict  прогноз времени для пациента из датасета, в том числе с изменёнными признаками
+  predict  прогноз времени для пациента, в том числе с изменёнными признаками
 
 Примеры:
   python scripts/survival_time_predictor.py export
   python scripts/survival_time_predictor.py predict --id 1444
   python scripts/survival_time_predictor.py predict --row 0 --set age=70 llo=1
+  python scripts/survival_time_predictor.py predict --row 5 --dataset full
 """
 
 import argparse
@@ -27,7 +29,8 @@ import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
-DATASET = ROOT / 'balanced_dataset.csv'
+FULL_XLSX = ROOT / 'med_dataset_cardio.xlsx'
+BALANCED_CSV = ROOT / 'balanced_dataset.csv'
 MODEL_JS = ROOT / 'docs' / 'survival_model.js'
 JS_PREFIX = 'window.SURVIVAL_MODEL = '
 
@@ -46,11 +49,27 @@ MODEL_NAMES = {
 # ---------------------------------------------------------------------------
 # Данные
 # ---------------------------------------------------------------------------
-def load_dataset(path=DATASET):
-    """balanced_dataset.csv — это df_balanced из ноутбука; первый столбец — индекс пациента в исходном датасете."""
-    df = pd.read_csv(path, index_col=0)
-    features = [c for c in df.columns if c not in ('time', 'target')]
-    return df, features
+def load_full_dataset(path=FULL_XLSX):
+    """med_dataset_cardio.xlsx с той же предобработкой, что в ноутбуке; индекс — ID пациента."""
+    data = pd.read_excel(path, header=0)
+    data.rename(columns={'0_na, 1_mi': 'severity', '0_no, 1_ther, 2_card': 'doctor'}, inplace=True)
+    data.drop(columns=['card', 'na', 'dmonit'], inplace=True)
+    data['target'] = data['result_cvd']
+    data.drop(columns=['result', 'result_cvd'], inplace=True)
+    features = [c for c in data.columns if c not in ('time', 'target')]
+    return data, features
+
+
+def balanced_subset(full, check_csv=BALANCED_CSV):
+    """df_balanced из ноутбука: пациенты с известным статусом на τ — умершие или наблюдавшиеся не меньше τ дней.
+    Ноутбук сохраняет его в balanced_dataset.csv; проверяем, что совпадает."""
+    df = full[(full['target'] == 1) | (full['time'] >= TAU)].copy()
+    if Path(check_csv).exists():
+        saved = pd.read_csv(check_csv, index_col=0, float_precision='round_trip')
+        same = saved.index.equals(df.index) and list(saved.columns) == list(df.columns) \
+            and np.array_equal(saved.values.astype(float), df.values.astype(float))
+        assert same, f'{check_csv} не совпадает с df_balanced из {FULL_XLSX.name}'
+    return df
 
 
 def split_dataset(df):
@@ -309,29 +328,42 @@ def test_metrics(curves, time_obs, event_obs):
             for name, S in curves.items()}
 
 
+SPLIT_NAMES = {0: 'не в df_balanced (цензурирован до τ), моделями не использовался', 1: 'обучающая выборка',
+               2: 'отложенная выборка'}
+
+
 def cmd_export(args):
-    df, features = load_dataset(args.data)
+    full, features = load_full_dataset(args.xlsx)
+    df = balanced_subset(full)
     train_idx, test_idx = split_dataset(df)
     print('Обучаем модели как в Survival-function-analysys.ipynb...')
     m = train_models(df, features, train_idx)
 
-    X_all_sc = m['scaler'].transform(df[features])
-    reference = library_survival(m, X_all_sc, features)
-    test_pos = df.index.get_indexer(test_idx)
+    # Эталонный прогноз библиотек — для всех пациентов полного датасета
+    reference = library_survival(m, m['scaler'].transform(full[features]), features)
+    test_pos = full.index.get_indexer(test_idx)
     metrics = test_metrics({k: S[test_pos] for k, S in reference.items()},
                            df.loc[test_idx, 'time'].astype(float).values, df.loc[test_idx, 'target'].astype(bool).values)
 
+    # Пациенты — весь med_dataset_cardio.xlsx; balanced_dataset.csv — подмножество его строк
+    split = np.zeros(len(full), dtype=int)
+    split[full.index.isin(train_idx)] = 1
+    split[full.index.isin(test_idx)] = 2
     bundle = {
         'meta': {'tau': TAU, 'generated': date.today().isoformat(), 'notebook': 'Survival-function-analysys.ipynb',
-                 'dataset': 'balanced_dataset.csv', 'model_names': MODEL_NAMES},
+                 'model_names': MODEL_NAMES},
         'features': features,
-        'columns': df.columns.tolist(),  # порядок столбцов balanced_dataset.csv — для выгрузки изменённого датасета
+        'columns': full.columns.tolist(),  # порядок столбцов датасетов — для выгрузки изменённого датасета
         'patients': {
-            'id': df.index.tolist(),
-            'time': df['time'].astype(int).tolist(),
-            'target': df['target'].astype(int).tolist(),
-            'test': df.index.isin(test_idx).astype(int).tolist(),
-            'X': [[float(v) for v in row] for row in df[features].values],
+            'id': full.index.tolist(),
+            'time': full['time'].astype(int).tolist(),
+            'target': full['target'].astype(int).tolist(),
+            'split': split.tolist(),  # 0 — не в df_balanced, 1 — обучающая, 2 — отложенная выборка
+            'X': [_round(row, 10) for row in full[features].values],
+        },
+        'datasets': {
+            'balanced': {'file': BALANCED_CSV.name, 'rows': full.index.get_indexer(df.index).tolist()},
+            'full': {'file': FULL_XLSX.name, 'rows': None},
         },
         **export_params(df, features, train_idx, m),
         'metrics': metrics,
@@ -341,9 +373,10 @@ def cmd_export(args):
 
     # Проверка: расчёт по экспортированным параметрам совпадает с библиотеками
     predictor = SurvivalTimePredictor(json.loads(json.dumps(bundle)))
+    print(f'Пациентов: {len(full)} в {FULL_XLSX.name}, из них {len(df)} в {BALANCED_CSV.name}')
     print(f'{"модель":<12} {"C-index (тест)":>15} {"Brier S(τ)":>11} {"max |ΔRMST|, дни":>18}')
     for name in MODEL_NAMES:
-        diff = np.abs(predictor.predict(df[features].values, name)['rmst'] - reference[name].sum(axis=1)).max()
+        diff = np.abs(predictor.predict(full[features].values, name)['rmst'] - reference[name].sum(axis=1)).max()
         print(f'{MODEL_NAMES[name]:<12} {metrics[name]["c_index"]:>15.4f} {metrics[name]["brier_s_tau"]:>11.3f} {diff:>18.2e}')
         assert diff < 0.05, f'{name}: расчёт по параметрам расходится с библиотекой'
 
@@ -361,7 +394,10 @@ def cmd_predict(args):
             raise SystemExit(f'Пациента с ID {args.id} нет в датасете')
         row = p['id'].index(args.id)
     else:
-        row = args.row
+        rows = predictor.bundle['datasets'][args.dataset]['rows'] or list(range(len(p['id'])))
+        if not 0 <= args.row < len(rows):
+            raise SystemExit(f'Строки {args.row} нет: в датасете {len(rows)} строк')
+        row = rows[args.row]
     x = np.array(p['X'][row], dtype=float)
     x_edit = x.copy()
     for item in args.set:
@@ -369,8 +405,7 @@ def cmd_predict(args):
         x_edit[predictor.features.index(feature)] = float(value)
 
     status = 'смерть от ССЗ' if p['target'][row] else 'жив / цензурирован'
-    print(f'Пациент: строка {row}, ID {p["id"][row]}; time = {p["time"][row]} дн. ({status}); '
-          f'{"отложенная" if p["test"][row] else "обучающая"} выборка')
+    print(f'Пациент ID {p["id"][row]}; time = {p["time"][row]} дн. ({status}); {SPLIT_NAMES[p["split"][row]]}')
     for i in np.flatnonzero(x_edit != x):
         print(f'  {predictor.features[i]}: {x[i]:g} → {x_edit[i]:g}')
     names = MODEL_NAMES if args.model == 'all' else {args.model: MODEL_NAMES[args.model]}
@@ -388,14 +423,17 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
 
     p_export = sub.add_parser('export', help='обучить модели и записать docs/survival_model.js')
-    p_export.add_argument('--data', default=DATASET)
+    p_export.add_argument('--xlsx', default=FULL_XLSX)
     p_export.add_argument('--out', default=MODEL_JS)
     p_export.set_defaults(func=cmd_export)
 
     p_predict = sub.add_parser('predict', help='прогноз времени для пациента')
     who = p_predict.add_mutually_exclusive_group(required=True)
-    who.add_argument('--row', type=int, help='номер строки в balanced_dataset.csv (с 0)')
-    who.add_argument('--id', type=int, help='ID пациента — первый столбец balanced_dataset.csv')
+    who.add_argument('--row', type=int, help='номер строки в датасете --dataset (с 0)')
+    who.add_argument('--id', type=int, help='ID пациента — индекс строки med_dataset_cardio.xlsx, '
+                                            'он же первый столбец balanced_dataset.csv')
+    p_predict.add_argument('--dataset', default='balanced', choices=['balanced', 'full'],
+                           help='для --row: balanced_dataset.csv или полный med_dataset_cardio.xlsx')
     p_predict.add_argument('--set', nargs='*', default=[], metavar='ПРИЗНАК=ЗНАЧЕНИЕ', help='изменённые признаки')
     p_predict.add_argument('--model', default='all', choices=['all', *MODEL_NAMES])
     p_predict.add_argument('--model-file', default=MODEL_JS)

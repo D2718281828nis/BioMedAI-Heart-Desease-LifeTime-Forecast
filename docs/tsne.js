@@ -20,19 +20,17 @@
 
   const EPS = 2.220446049250313e-16;
 
-  function squaredDistances(X, n, d) {
-    const D = new Float64Array(n * n);
-    for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) {
-        let s = 0;
-        for (let k = 0; k < d; k++) {
-          const diff = X[i * d + k] - X[j * d + k];
-          s += diff * diff;
-        }
-        D[i * n + j] = D[j * n + i] = s;
+  // Квадраты расстояний от объекта x до всех строк X (матрицу N × N не храним: для 1506 пациентов это 18 МБ)
+  function squaredDistancesTo(x, X, n, d, out) {
+    for (let j = 0; j < n; j++) {
+      let s = 0;
+      for (let k = 0; k < d; k++) {
+        const diff = x[k] - X[j * d + k];
+        s += diff * diff;
       }
+      out[j] = s;
     }
-    return D;
+    return out;
   }
 
   // Условные вероятности p(j|i) для строки расстояний dist (skip — индекс самого объекта или -1).
@@ -131,12 +129,12 @@
     this.learningRate = Math.max(n / opts.exaggeration / 4, 50);
     this.iter = 0;
 
-    this.D = squaredDistances(X, n, d);
     // Совместные вероятности P = (P(j|i) + P(i|j)) / 2N
     const P = new Float64Array(n * n);
-    const row = new Float64Array(n);
+    const dist = new Float64Array(n), row = new Float64Array(n);
     for (let i = 0; i < n; i++) {
-      conditionalRow(this.D.subarray(i * n, (i + 1) * n), i, this.perplexity, row);
+      squaredDistancesTo(X.subarray(i * d, (i + 1) * d), X, n, d, dist);
+      conditionalRow(dist, i, this.perplexity, row);
       P.set(row, i * n);
     }
     for (let i = 0; i < n; i++) {
@@ -150,42 +148,44 @@
     this.update = new Float64Array(2 * n);
     this.gains = new Float64Array(2 * n).fill(1);
     this.grad = new Float64Array(2 * n);
-    this.W = new Float64Array(n * n);
+    this.repulsion = new Float64Array(2 * n);
   }
 
   TSNE.prototype.done = function () {
     return this.iter >= this.iterations;
   };
 
-  // Выполнить steps итераций градиентного спуска; возвращает true, когда оптимизация закончена
+  // Выполнить steps итераций градиентного спуска; возвращает true, когда оптимизация закончена.
+  // Градиент 4 Σ_j (P_ij − q_ij) w_ij (y_i − y_j), q_ij = w_ij / Σ w, раскладываем на притяжение
+  // Σ P_ij w_ij (y_i − y_j) и отталкивание Σ w_ij² (y_i − y_j) / Σ w — оба копятся за один проход по парам i < j
   TSNE.prototype.step = function (steps) {
-    const { n, Y, P, W, grad, update, gains } = this;
+    const { n, Y, P, grad, repulsion, update, gains } = this;
     for (let s = 0; s < steps && this.iter < this.iterations; s++, this.iter++) {
       const early = this.iter < this.exaggerationIters;
       const exag = early ? this.exaggeration : 1;
       const momentum = early ? 0.5 : 0.8;
 
+      grad.fill(0);
+      repulsion.fill(0);
       let sumW = 0;
       for (let i = 0; i < n; i++) {
+        const yx = Y[2 * i], yy = Y[2 * i + 1];
+        let ax = 0, ay = 0, rx = 0, ry = 0;
         for (let j = i + 1; j < n; j++) {
-          const dx = Y[2 * i] - Y[2 * j], dy = Y[2 * i + 1] - Y[2 * j + 1];
+          const dx = yx - Y[2 * j], dy = yy - Y[2 * j + 1];
           const w = 1 / (1 + dx * dx + dy * dy);
-          W[i * n + j] = W[j * n + i] = w;
-          sumW += 2 * w;
+          sumW += w;
+          const a = exag * P[i * n + j] * w, r = w * w;
+          ax += a * dx; ay += a * dy;
+          rx += r * dx; ry += r * dy;
+          grad[2 * j] -= a * dx; grad[2 * j + 1] -= a * dy;
+          repulsion[2 * j] -= r * dx; repulsion[2 * j + 1] -= r * dy;
         }
+        grad[2 * i] += ax; grad[2 * i + 1] += ay;
+        repulsion[2 * i] += rx; repulsion[2 * i + 1] += ry;
       }
-      for (let i = 0; i < n; i++) {
-        let gx = 0, gy = 0;
-        for (let j = 0; j < n; j++) {
-          if (j === i) continue;
-          const w = W[i * n + j];
-          const m = (exag * P[i * n + j] - Math.max(w / sumW, EPS)) * w;
-          gx += m * (Y[2 * i] - Y[2 * j]);
-          gy += m * (Y[2 * i + 1] - Y[2 * j + 1]);
-        }
-        grad[2 * i] = 4 * gx;
-        grad[2 * i + 1] = 4 * gy;
-      }
+      sumW *= 2;
+      for (let k = 0; k < 2 * n; k++) grad[k] = 4 * (grad[k] - repulsion[k] / sumW);
       for (let k = 0; k < 2 * n; k++) {
         gains[k] = update[k] * grad[k] < 0 ? gains[k] + 0.2 : Math.max(gains[k] * 0.8, 0.01);
         update[k] = momentum * update[k] - this.learningRate * gains[k] * grad[k];
@@ -233,15 +233,7 @@
    */
   TSNE.prototype.project = function (x, exclude) {
     const { n, d, Y } = this;
-    const dist = new Float64Array(n);
-    for (let j = 0; j < n; j++) {
-      let s = 0;
-      for (let k = 0; k < d; k++) {
-        const diff = x[k] - this.X[j * d + k];
-        s += diff * diff;
-      }
-      dist[j] = s;
-    }
+    const dist = squaredDistancesTo(x, this.X, n, d, new Float64Array(n));
     const p = conditionalRow(dist, exclude, this.perplexity, new Float64Array(n));
     const near = [];
     for (let j = 0; j < n; j++) if (p[j] > 1e-12) near.push(j);

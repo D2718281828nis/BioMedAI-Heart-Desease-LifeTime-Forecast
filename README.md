@@ -29,17 +29,20 @@
 
 ## Интерактивная страница
 
-[d2718281828nis.github.io/BioMedAI-Heart-Desease-LifeTime-Forecast](https://d2718281828nis.github.io/BioMedAI-Heart-Desease-LifeTime-Forecast/) — исследование пациентов из [balanced_dataset.csv](balanced_dataset.csv) ([docs/](docs/)):
+[d2718281828nis.github.io/BioMedAI-Heart-Desease-LifeTime-Forecast](https://d2718281828nis.github.io/BioMedAI-Heart-Desease-LifeTime-Forecast/) ([docs/](docs/)) — исследование пациентов из [balanced_dataset.csv](balanced_dataset.csv) (408) или полного [med_dataset_cardio.xlsx](med_dataset_cardio.xlsx) (1506), датасет выбирается на странице:
 
-- карта t-SNE всех 408 пациентов, цвет — `target`; perplexity задаётся на странице, t-SNE считается в браузере;
+- карта t-SNE всех пациентов датасета, цвет — `target`; perplexity задаётся на странице, t-SNE считается в браузере;
 - пациент выбирается по ID, номеру строки или щелчком по карте и обводится на карте; при наведении на точку видно `time` из датасета;
-- любой из 30 признаков пациента можно изменить ползунком или вводом числа: точка перемещается на карте (из исходного положения на новое), а время дожития пересчитывается подходом [Survival-function-analysys.ipynb](Survival-function-analysys.ipynb) — функция выживаемости S(t) и прогноз RMST(τ) = ∫₀^τ S(t) dt, τ = 1500 дней, по любой из пяти моделей ноутбука;
-- интерфейс на английском и русском, переключатель EN/RU в шапке (тексты — [docs/i18n.js](docs/i18n.js)).
+- любой из 30 признаков пациента можно изменить ползунком или вводом числа: точка перемещается на карте (из исходного положения на новое), а время дожития пересчитывается подходом [Survival-function-analysys.ipynb](Survival-function-analysys.ipynb) — функция выживаемости S(t) и прогноз RMST(τ) = ∫₀^τ S(t) dt, τ = 1500 дней, по любой из пяти моделей ноутбука; изменения привязаны к ID пациента и видны в обоих датасетах;
+- интерфейс на русском (по умолчанию) и английском, переключатель RU/EN в шапке; ссылка на английскую версию — [?lang=en](https://d2718281828nis.github.io/BioMedAI-Heart-Desease-LifeTime-Forecast/?lang=en) (тексты — [docs/i18n.js](docs/i18n.js)).
 
-Прогноз времени — [scripts/survival_time_predictor.py](scripts/survival_time_predictor.py): обучает модели как в ноутбуке (то же разбиение, стандартизация и гиперпараметры; C-index и Brier на отложенной выборке совпадают с ноутбуком) и выгружает их параметры в `docs/survival_model.js`, по которым страница считает S(t) на JavaScript. Тот же прогноз из командной строки:
+Модели обучены, как в ноутбуке, на `df_balanced` — это balanced_dataset.csv; для остальных 1098 пациентов полного датасета (цензурированных до τ) прогноз делают те же модели.
+
+Прогноз времени — [scripts/survival_time_predictor.py](scripts/survival_time_predictor.py): читает med_dataset_cardio.xlsx с предобработкой ноутбука (и проверяет, что `df_balanced` совпадает с balanced_dataset.csv), обучает модели как в ноутбуке (то же разбиение, стандартизация и гиперпараметры; C-index и Brier на отложенной выборке совпадают с ноутбуком) и выгружает их параметры и оба датасета в `docs/survival_model.js`, по которым страница считает S(t) на JavaScript. Тот же прогноз из командной строки:
 
 ```bash
 conda run -n biomedai python scripts/survival_time_predictor.py predict --id 1444 --set age=70 llo=1
+conda run -n biomedai python scripts/survival_time_predictor.py predict --row 5 --dataset full
 ```
 
 После изменения данных или моделей пересоберите параметры и проверьте, что JavaScript-расчёт совпадает с lifelines / xgboost / keras:

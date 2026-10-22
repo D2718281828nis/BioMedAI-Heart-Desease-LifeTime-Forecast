@@ -15,14 +15,17 @@
   const STRINGS = {
     en: {
       'doc.title': 'Survival Time Explorer',
-      'doc.description': 'Interactive t-SNE map of 408 acute coronary syndrome patients: select a patient, edit clinical parameters and re-predict survival time with the models of Survival-function-analysys.ipynb.',
+      'doc.description': 'Interactive t-SNE map of acute coronary syndrome patients (balanced_dataset.csv or the full med_dataset_cardio.xlsx): select a patient, edit clinical parameters and re-predict survival time with the models of Survival-function-analysys.ipynb.',
       'h1': 'Survival time explorer',
-      'lede': `408 patients after acute coronary syndrome from <code>balanced_dataset.csv</code>. The map is a t-SNE of their 30 clinical parameters, colored by outcome. Select a patient and change any parameter: the point moves on the map and the time is re-predicted with the survival models of <a href="${NOTEBOOK_URL}">Survival-function-analysys.ipynb</a>.`,
+      'lede': `Patients after acute coronary syndrome: <code>balanced_dataset.csv</code> (408 patients with a known status at τ = 1500 days, as in the notebook) or the full <code>med_dataset_cardio.xlsx</code> (1506). The map is a t-SNE of their 30 clinical parameters, colored by outcome. Select a patient and change any parameter: the point moves on the map and the time is re-predicted with the survival models of <a href="${NOTEBOOK_URL}">Survival-function-analysys.ipynb</a>.`,
       'lang.group': 'Language',
       'theme.toLight': 'Switch to light theme',
       'theme.toDark': 'Switch to dark theme',
 
       'toolbar.aria': 'Map and model settings',
+      'dataset.label': 'Dataset',
+      'dataset.balanced': 'balanced_dataset.csv ({n})',
+      'dataset.full': 'med_dataset_cardio.xlsx ({n})',
       'perplexity.label': 't-SNE perplexity',
       'perplexity.aria': 'Perplexity value',
       'model.label': 'Survival model',
@@ -30,17 +33,19 @@
       'download': 'Download CSV',
 
       'map.title': 't-SNE map of patients',
-      'map.aria': 't-SNE map of 408 patients colored by outcome. Hover a point to see its time; click to select it. The same data is in the table view below.',
+      'map.aria': 't-SNE map of the patients of the selected dataset, colored by outcome. Hover a point to see its time; click to select it. The same data is in the table view below.',
       'map.hint': 'Hover a point to see its time · click to select',
       'legend.t0': 'Alive / censored (target = 0), n = {n}',
       'legend.t1': 'CVD death (target = 1), n = {n}',
       'legend.selected': 'Selected',
       'legend.edited': 'Edited: dataset position → new position',
       'status.initial': 'Computing t-SNE…',
+      'status.affinities': 'Computing t-SNE: pairwise similarities of {n} patients…',
       'status.running': 'Computing t-SNE: iteration {i} / 1000 · perplexity {p}',
       'status.done': 't-SNE · perplexity {p} · KL divergence {kl} · edited patients: {n}',
       'tt.title': 'ID {id} · row {row}',
       'tt.heldOut': ' · held-out',
+      'tt.excluded': ' · censored before τ',
       'tt.time': 'time (dataset)',
       'tt.outcome': 'outcome, target = {t}',
       'tt.pred': 'predicted time, {model}',
@@ -51,6 +56,7 @@
       'hero.edited': 'With your edits · {model}',
       'hero.dataset': 'Dataset values · {model}',
       'hero.sub': 'expected days alive within τ = {tau} days (RMST); compare with min(time, τ) = {v}',
+      'hero.subCensored': 'expected days alive within τ = {tau} days (RMST); censored on day {v}, so min(T, τ) ≥ {v}',
       'hero.delta': ' vs dataset values ({v} days)',
       'hero.hint': 'Edit a parameter to re-predict.',
       'unit.days': 'days',
@@ -91,9 +97,11 @@
       'patient.row': 'Row',
       'patient.rowOf': 'row {i} of {max}',
       'patient.notFound': 'No patient with ID {id}',
+      'patient.notInDataset': 'ID {id} is not in {file}',
       'patient.reset': 'Reset patient',
       'patient.test': 'held-out test patient',
       'patient.train': 'training patient',
+      'patient.excluded': 'not used by the models: censored before τ',
       'patient.edited': 'edited parameters: {n}',
       'mini.time': 'time in dataset ',
       'mini.pred': 'predicted ({model}) ',
@@ -123,8 +131,9 @@
       'method.title': 'How it works',
       'method.list': `
         <li><b>Time prediction</b> follows <i>Survival-function-analysys.ipynb</i>: a model gives the survival function S(t) of the patient, and the predicted time is RMST(τ), the area under S(t) up to τ = 1500 days. It is compared with min(time, τ) from the dataset.</li>
-        <li><b>Models</b> (CoxPH, Weibull AFT, XGBoost Cox, NN and reservoir network with Cox calibration) are trained exactly as in the notebook: the same 326 training patients (stratified split, <code>random_state=37</code>), <code>StandardScaler</code> and hyperparameters. C-index and Brier score are measured on the 82 held-out patients.</li>
-        <li><b>t-SNE</b> is computed in the browser on the 30 standardized parameters (exact method, PCA initialization, 1000 iterations, as in scikit-learn). When you edit a patient, it is placed onto the fixed map by out-of-sample t-SNE: only that point moves, from its dataset position (hollow circle) to the new one.</li>
+        <li><b>Models</b> (CoxPH, Weibull AFT, XGBoost Cox, NN and reservoir network with Cox calibration) are trained exactly as in the notebook: the same 326 training patients of <code>balanced_dataset.csv</code> (stratified split, <code>random_state=37</code>), <code>StandardScaler</code> and hyperparameters. C-index and Brier score are measured on the 82 held-out patients.</li>
+        <li><b>Datasets.</b> <code>balanced_dataset.csv</code> is the notebook's <code>df_balanced</code>: the patients of <code>med_dataset_cardio.xlsx</code> whose status at τ is known (CVD death or follow-up ≥ τ). With the full <code>med_dataset_cardio.xlsx</code> the same models predict all 1506 patients, including 1098 censored before τ that the models never saw; for them only a lower bound of min(T, τ) is known.</li>
+        <li><b>t-SNE</b> is computed in the browser on the 30 parameters standardized within the selected dataset (exact method, PCA initialization, 1000 iterations, as in scikit-learn). When you edit a patient, it is placed onto the fixed map by out-of-sample t-SNE: only that point moves, from its dataset position (hollow circle) to the new one. Edits are kept by patient ID across both datasets.</li>
         <li>The same prediction from the command line:</li>`,
       'footer.license': 'MIT license',
       'footer.generated': 'models re-trained {date} by scripts/survival_time_predictor.py',
@@ -132,14 +141,17 @@
 
     ru: {
       'doc.title': 'Время дожития: карта пациентов',
-      'doc.description': 'Интерактивная карта t-SNE 408 пациентов после острого коронарного синдрома: выберите пациента, измените клинические признаки и пересчитайте прогноз времени дожития моделями Survival-function-analysys.ipynb.',
+      'doc.description': 'Интерактивная карта t-SNE пациентов после острого коронарного синдрома (balanced_dataset.csv или полный med_dataset_cardio.xlsx): выберите пациента, измените клинические признаки и пересчитайте прогноз времени дожития моделями Survival-function-analysys.ipynb.',
       'h1': 'Исследование времени дожития',
-      'lede': `408 пациентов после острого коронарного синдрома из <code>balanced_dataset.csv</code>. Карта — t-SNE по 30 клиническим признакам, цвет — исход. Выберите пациента и измените любой признак: точка переместится на карте, а время дожития будет заново спрогнозировано моделями выживаемости из <a href="${NOTEBOOK_URL}">Survival-function-analysys.ipynb</a>.`,
+      'lede': `Пациенты после острого коронарного синдрома: <code>balanced_dataset.csv</code> (408 пациентов с известным статусом на τ = 1500 дней, как в ноутбуке) или полный <code>med_dataset_cardio.xlsx</code> (1506). Карта — t-SNE по 30 клиническим признакам, цвет — исход. Выберите пациента и измените любой признак: точка переместится на карте, а время дожития будет заново спрогнозировано моделями выживаемости из <a href="${NOTEBOOK_URL}">Survival-function-analysys.ipynb</a>.`,
       'lang.group': 'Язык',
       'theme.toLight': 'Включить светлую тему',
       'theme.toDark': 'Включить тёмную тему',
 
       'toolbar.aria': 'Настройки карты и модели',
+      'dataset.label': 'Датасет',
+      'dataset.balanced': 'balanced_dataset.csv ({n})',
+      'dataset.full': 'med_dataset_cardio.xlsx ({n})',
       'perplexity.label': 'Perplexity t-SNE',
       'perplexity.aria': 'Значение perplexity',
       'model.label': 'Модель выживаемости',
@@ -147,17 +159,19 @@
       'download': 'Скачать CSV',
 
       'map.title': 'Карта пациентов (t-SNE)',
-      'map.aria': 'Карта t-SNE 408 пациентов, цвет — исход. Наведите на точку, чтобы увидеть time; щелчок выбирает пациента. Те же данные — в таблице ниже.',
+      'map.aria': 'Карта t-SNE пациентов выбранного датасета, цвет — исход. Наведите на точку, чтобы увидеть time; щелчок выбирает пациента. Те же данные — в таблице ниже.',
       'map.hint': 'Наведите на точку — увидите time · щелчок выбирает пациента',
       'legend.t0': 'Жив / цензурирован (target = 0), n = {n}',
       'legend.t1': 'Смерть от ССЗ (target = 1), n = {n}',
       'legend.selected': 'Выбранный пациент',
       'legend.edited': 'Изменён: положение по датасету → новое',
       'status.initial': 'Расчёт t-SNE…',
+      'status.affinities': 'Расчёт t-SNE: попарные сходства {n} пациентов…',
       'status.running': 'Расчёт t-SNE: итерация {i} / 1000 · perplexity {p}',
       'status.done': 't-SNE · perplexity {p} · KL-дивергенция {kl} · изменённых пациентов: {n}',
       'tt.title': 'ID {id} · строка {row}',
       'tt.heldOut': ' · тестовая выборка',
+      'tt.excluded': ' · цензурирован до τ',
       'tt.time': 'time (датасет)',
       'tt.outcome': 'исход, target = {t}',
       'tt.pred': 'прогноз времени, {model}',
@@ -168,6 +182,7 @@
       'hero.edited': 'С вашими изменениями · {model}',
       'hero.dataset': 'Значения из датасета · {model}',
       'hero.sub': 'ожидаемое число дней жизни в пределах τ = {tau} дн. (RMST); сравнивается с min(time, τ) = {v}',
+      'hero.subCensored': 'ожидаемое число дней жизни в пределах τ = {tau} дн. (RMST); цензурирован на {v}-й день, поэтому min(T, τ) ≥ {v}',
       'hero.delta': ' относительно значений датасета ({v} дн.)',
       'hero.hint': 'Измените любой признак — прогноз пересчитается.',
       'unit.days': 'дн.',
@@ -208,9 +223,11 @@
       'patient.row': 'Строка',
       'patient.rowOf': 'строка {i} из {max}',
       'patient.notFound': 'Нет пациента с ID {id}',
+      'patient.notInDataset': 'ID {id} нет в {file}',
       'patient.reset': 'Сбросить пациента',
       'patient.test': 'тестовая (отложенная) выборка',
       'patient.train': 'обучающая выборка',
+      'patient.excluded': 'не использовался моделями: цензурирован до τ',
       'patient.edited': 'изменено признаков: {n}',
       'mini.time': 'time в датасете ',
       'mini.pred': 'прогноз ({model}) ',
@@ -240,8 +257,9 @@
       'method.title': 'Как это работает',
       'method.list': `
         <li><b>Прогноз времени</b> — как в <i>Survival-function-analysys.ipynb</i>: модель даёт функцию выживаемости пациента S(t), а прогноз времени — RMST(τ), площадь под S(t) до τ = 1500 дней. Он сравнивается с min(time, τ) из датасета.</li>
-        <li><b>Модели</b> (CoxPH, Weibull AFT, XGBoost Cox, полносвязная и резервуарная нейросети с калибровкой Кокса) обучены в точности как в ноутбуке: те же 326 пациентов обучающей выборки (стратифицированное разбиение, <code>random_state=37</code>), <code>StandardScaler</code> и гиперпараметры. C-index и Brier score измерены на 82 пациентах отложенной выборки.</li>
-        <li><b>t-SNE</b> считается в браузере по 30 стандартизованным признакам (точный метод, инициализация PCA, 1000 итераций — как в scikit-learn). Изменённый пациент помещается на готовую карту методом out-of-sample t-SNE: двигается только его точка — из положения по датасету (пустой кружок) в новое.</li>
+        <li><b>Модели</b> (CoxPH, Weibull AFT, XGBoost Cox, полносвязная и резервуарная нейросети с калибровкой Кокса) обучены в точности как в ноутбуке: те же 326 пациентов обучающей выборки <code>balanced_dataset.csv</code> (стратифицированное разбиение, <code>random_state=37</code>), <code>StandardScaler</code> и гиперпараметры. C-index и Brier score измерены на 82 пациентах отложенной выборки.</li>
+        <li><b>Датасеты.</b> <code>balanced_dataset.csv</code> — это <code>df_balanced</code> из ноутбука: пациенты <code>med_dataset_cardio.xlsx</code> с известным статусом на τ (смерть от ССЗ или наблюдение не меньше τ). На полном <code>med_dataset_cardio.xlsx</code> те же модели дают прогноз для всех 1506 пациентов, в том числе для 1098 цензурированных до τ, которых модели не видели; для них известна только нижняя граница min(T, τ).</li>
+        <li><b>t-SNE</b> считается в браузере по 30 признакам, стандартизованным внутри выбранного датасета (точный метод, инициализация PCA, 1000 итераций — как в scikit-learn). Изменённый пациент помещается на готовую карту методом out-of-sample t-SNE: двигается только его точка — из положения по датасету (пустой кружок) в новое. Изменения привязаны к ID пациента и сохраняются в обоих датасетах.</li>
         <li>Тот же прогноз из командной строки:</li>`,
       'footer.license': 'лицензия MIT',
       'footer.generated': 'модели переобучены {date} скриптом scripts/survival_time_predictor.py',
@@ -320,14 +338,18 @@
   const LOCALES = { en: 'en-US', ru: 'ru-RU' };
   const STORAGE_KEY = 'survival-explorer:v1';
 
-  // Язык: сохранённый выбор, иначе язык браузера
+  // Язык: параметр ссылки ?lang=en|ru, иначе сохранённый выбор, иначе русский
+  const DEFAULT_LANG = 'ru';
   function detect() {
+    try {
+      const fromUrl = new URLSearchParams(window.location.search).get('lang');
+      if (STRINGS[fromUrl]) return fromUrl;
+    } catch (e) { /* адрес без параметров */ }
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
       if (saved && STRINGS[saved.lang]) return saved.lang;
     } catch (e) { /* хранилище недоступно */ }
-    const preferred = (navigator.languages || [navigator.language || '']).map((l) => String(l).toLowerCase());
-    return preferred.some((l) => l.startsWith('ru')) ? 'ru' : 'en';
+    return DEFAULT_LANG;
   }
 
   let lang = detect();
