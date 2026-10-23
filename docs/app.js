@@ -18,9 +18,8 @@
   const TAU = BUNDLE.meta.tau;
   const MODELS = BUNDLE.meta.model_names;
   const MODEL_KEYS = Object.keys(MODELS);
-  // Модель по умолчанию — своя для каждой популяции: для balanced_dataset.csv (исход к τ известен у всех) —
-  // многоэтапный конвейер, обученный на этой популяции; для всей когорты — CoxPH (лучшие IBS и AUC на отложенной
-  // выборке). Метрики в таблице моделей тоже считаются на отложенных пациентах выбранного датасета
+  // Модель по умолчанию: для balanced_dataset.csv — многоэтапный конвейер, для всей когорты — CoxPH. Все модели
+  // откалиброваны на всю когорту, поэтому метрики в таблице моделей — на отложенных пациентах всей когорты
   const DEFAULT_MODELS = { balanced: 'stg', full: 'cph' };
   // Признаки, которые модели не используют (известны только после выписки)
   const MODEL_FEATURES = new Set(BUNDLE.model_features || BUNDLE.features);
@@ -63,7 +62,7 @@
     crea: { step: 1, group: 'labs' },
   };
   const GROUPS = ['demo', 'vitals', 'comorb', 'event', 'treat', 'labs'];
-  // patients.split: 0 — только калибровка S(t), 1 — обучение моделей и калибровка, 2 — отложенная выборка
+  // patients.split: 0 — обучающий, цензурирован до τ; 1 — обучающий из balanced_dataset.csv; 2 — отложенная выборка
   const SPLIT_KEYS = ['patient.calib', 'patient.train', 'patient.test'];
 
   const { t } = I18N;
@@ -717,7 +716,7 @@
   function renderModelTable() {
     const g = state.selected;
     const edited = editedSet.has(g);
-    const metrics = BUNDLE.metrics[ds.key];
+    const metrics = BUNDLE.metrics;
     $('model-table').tBodies[0].replaceChildren(...MODEL_KEYS.map((m) => {
       const radio = el('input', { type: 'radio', name: 'model-radio', value: m, checked: m === state.model });
       radio.addEventListener('change', () => setModel(m));
@@ -734,8 +733,8 @@
       return tr;
     }));
     const r = metrics[state.model];
-    $('models-note').textContent = t(ds.key === 'balanced' ? 'models.noteBalanced' : 'models.note', {
-      n: BUNDLE.meta.test_size[ds.key], model: MODELS[state.model], c: I18N.fixed(r.c_index, 3),
+    $('models-note').textContent = t('models.note', {
+      n: BUNDLE.meta.test_size, model: MODELS[state.model], c: I18N.fixed(r.c_index, 3),
       auc30: I18N.fixed(r.auc_30, 3), auc365: I18N.fixed(r.auc_365, 3), ibs: I18N.fixed(r.ibs, 3), mae: fmtDays(r.mae),
     });
   }

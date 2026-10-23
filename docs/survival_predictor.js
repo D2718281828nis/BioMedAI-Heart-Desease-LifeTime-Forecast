@@ -147,12 +147,17 @@
       }
     }
 
-    // Модель для популяции balanced_dataset.csv — как balanced_mixture() в scripts/survival_time_predictor.py:
-    // логистическая регрессия «смерть от ССЗ до τ»; S(t) = 1 − p·F(t), F — доля умерших к дню t среди умерших
-    // от ССЗ до τ в обучающей выборке
+    // Balanced mixture — как balanced_mixture() в scripts/survival_time_predictor.py: логистическая регрессия
+    // «смерть от ССЗ до τ» (df_balanced и частичные метки цензурированных до τ); S(t) = 1 − p·F(t), F — доля умерших
+    // к дню t среди умерших от ССЗ до τ в обучающей выборке с весами IPCW
     const bal = models.bal;
     const deathCdf = new Float64Array(tau);
-    for (let t = 0; t < tau; t++) deathCdf[t] = bal.death_days.filter((day) => day <= t).length / bal.death_days.length;
+    const deathTotal = bal.death_weights.reduce((sum, w) => sum + w, 0);
+    for (let t = 0; t < tau; t++) {
+      let sum = 0;
+      bal.death_days.forEach((day, k) => { if (day <= t) sum += bal.death_weights[k]; });
+      deathCdf[t] = sum / deathTotal;
+    }
     function balanced(z) {
       let s = bal.intercept;
       for (let k = 0; k < d; k++) s += bal.coef[k] * z[k];

@@ -10,14 +10,28 @@
 умершие рано их не получают (92% и 100% умерших от ССЗ в первые 30 дней), то есть в них частично заложен исход
 (immortal time bias). Модели используют только 28 признаков, известных при поступлении (MODEL_FEATURES).
 
-2. df_balanced — это смерти от ССЗ и пациенты, наблюдавшиеся не меньше τ;
-1098 пациентов, цензурированных раньше τ, в него не входят. Поэтому доля смертей в нём 37% вместо 10%,
-и функции выживаемости, оценённые на нём, сильно занижены: средний прогноз S(τ) 0,63–0,72 против 0,88
-по Каплану — Мейеру на отложенных пациентах. Модели по-прежнему обучаются на df_balanced (там у всех известен
-исход, и пациентов они ранжируют лучше всего), а переход от оценки риска модели к S(t) — калибратор Кокса
-(для Weibull AFT — Weibull) — обучается на всей обучающей когорте med_dataset_cardio.xlsx с учётом
-цензурирования. Оценки риска для пациентов df_balanced при этом берутся вне выборки (5 фолдов). Для нейросетей
-оценка риска — логит, а не вероятность: вероятность насыщается у 1 и сжимает прогноз у пациентов высокого риска.
+2. df_balanced — это смерти от ССЗ и пациенты, наблюдавшиеся не меньше τ. Пациентов включали в исследование
+около двух лет, а закончилось оно для всех в один день: живые наблюдались 889–1634 дня, и 1098 пациентов,
+цензурированных раньше τ, — в основном включённые поздно. Но df_balanced отбирает по исходу, а не по дате
+включения: поздно включённые, умершие от ССЗ, в нём остаются (около 75% из 152 смертей), а выжившие — нет. Поэтому
+смертей в нём 37%, а во всей когорте к τ — 11% (Каплан — Мейер). Это видно и без допущений о цензурировании:
+до 889-го дня ни один живой пациент не выбывает, и в первый год от ССЗ умерли 88 из 1506 (5,8%), а в
+df_balanced — 88 из 408 (21,6%). Функции выживаемости, оценённые на df_balanced, поэтому сильно занижены: средний
+прогноз S(τ) 0,63–0,72 против 0,88 по Каплану — Мейеру на отложенных пациентах.
+
+Модели ноутбука по-прежнему обучаются на df_balanced, а переход от оценки риска модели к S(t) — калибратор Кокса
+(для Weibull AFT — Weibull) с одной ковариатой s: S(t | s) = S₀(t)^exp(c·s) — обучается на всей обучающей когорте
+med_dataset_cardio.xlsx с учётом цензурирования. Оценки риска для пациентов df_balanced при этом берутся вне выборки
+(5 фолдов). Для нейросетей оценка риска — логит, а не вероятность: вероятность насыщается у 1 и сжимает прогноз
+у пациентов высокого риска.
+
+Balanced mixture и Staged pipeline учат «смерть от ССЗ до τ» — исход, который у цензурированных до τ неизвестен.
+Рано и поздно включённые пациенты различаются и по признакам при поступлении (AUC 0,70: у включённых рано выше
+холестерин, ЛПНП и ФВ, меньше инфарктов), поэтому одних весов IPCW по времени недостаточно: средний прогноз S(τ)
+остаётся 0,80–0,82. Цензурированные до τ входят в обучение с частичными метками (survival_share): известный исход
+берётся как есть, а пациент, живой на день выбывания C, входит выжившим с весом q — долей доживших до τ среди
+PSEUDO_NEIGHBOURS самых похожих на него пациентов, тоже живых на день C, с известным к τ исходом, — и умершим до τ
+с весом 1 − q.
 
 Команды:
   export   обучить модели и калибраторы, записать параметры и оба датасета в docs/survival_model.js
@@ -79,31 +93,41 @@ SURVIVAL_MODELS = ['cph', 'aft', 'xgb', 'nn', 'rn']
 # при поступлении; kNN, t-SNE, агломеративная кластеризация, ансамбли и конструированные признаки его не превзошли).
 EARLY_DAYS = 365
 
-# Модель для популяции balanced_dataset.csv — пациентов, у которых исход к τ известен (смерть от ССЗ или
-# наблюдение ≥ τ; смертей от ССЗ 37% вместо 10% во всей когорте). Остальные модели откалиброваны на всю когорту
-# и для этой популяции занижают риск. Логистическая регрессия «смерть от ССЗ до τ» на 326 обучающих пациентах
-# df_balanced: S(t) = 1 − p·F(t), F — доля умерших к дню t среди умерших от ССЗ до τ в обучающей выборке; прогноз —
-# медиана S(t). Применять — только к пациентам этой популяции.
+# Частичные метки цензурированных до τ (см. docstring): число похожих пациентов, по которым считается q. Соседи —
+# обучающие пациенты df_balanced, живые на день выбывания, расстояние — по 28 стандартизованным признакам, доля
+# доживших — с весами IPCW соседей (выжившие до τ попадают в df_balanced реже умерших). При кросс-валидации (5 × 5
+# фолдов на 1204 обучающих) частичные метки лучше весов IPCW по C-index (+0,025), IBS и калибровке RMST (32–34 дня
+# против 64–95); k = 25, 50 и 100 дают одно и то же.
+PSEUDO_NEIGHBOURS = 50
 
-# Многоэтапный конвейер для той же популяции (train_staged):
+# Balanced mixture: логистическая регрессия «смерть от ССЗ до τ» на 326 обучающих пациентах df_balanced и 878
+# цензурированных до τ с частичными метками; S(t) = 1 − p·F(t), F — доля умерших к дню t среди умерших от ССЗ до τ
+# с весами IPCW 1/G(T) (поздние смерти поздно включённых не наблюдаются; то же, что распределение по Каплану —
+# Мейеру); прогноз — медиана S(t). Без цензурированных модель была откалибрована на df_balanced, а не на пациентов
+# при поступлении: принадлежность к df_balanced зависит от исхода и даты включения и заранее не известна.
+
+# Многоэтапный конвейер (train_staged):
 # 1) вся когорта; 2) без ранних смертей (смерть от ССЗ в первые STAGED_EARLY_DAYS = 10 дней); 3) правило balanced
-# из ноутбука (смерть от ССЗ или наблюдение ≥ τ) — новый balanced без ранних смертей, его обучающие пациенты;
-# классификация в три группы: этап 1 — ранняя смерть или нет, этап 2 — смерть от ССЗ до τ или жизнь дольше τ
-# (логистическая регрессия на новом balanced); 4) модель Кокса на новом balanced — время поздней смерти;
-# 5) S(t) = 1 − p_ранн·F_ранн(t) − p_поздн·F_поздн(t | x), где F_ранн — распределение дней ранней смерти, F_поздн — время
-# смерти по модели Кокса при условии смерти до τ. Прогноз — медиана S(t): вероятности классификатора определяют время
-# каждого пациента. Жёсткая маршрутизация (время группы с наибольшей вероятностью) при кросс-валидации хуже; на странице
-# она показана справочно.
+# из ноутбука (смерть от ССЗ или наблюдение ≥ τ) — новый balanced без ранних смертей, его обучающие пациенты, и
+# цензурированные до τ с частичными метками; классификация в три группы: этап 1 — ранняя смерть или нет (все
+# обучающие: статус на 10-й день известен у всех), этап 2 — смерть от ССЗ до τ или жизнь дольше τ (логистическая
+# регрессия на новом balanced и частичных метках); 4) модель Кокса на всех обучающих, переживших 10 дней
+# (цензурированные — на дне выбывания), — время поздней смерти;
+# 5) S(t) = 1 − p_ранн·F_ранн(t) − p_поздн·F_поздн(t | x), где F_ранн — распределение дней ранней смерти (до 10-го
+# дня живые не выбывают), F_поздн — время смерти по модели Кокса при условии смерти до τ. Прогноз — медиана S(t):
+# вероятности классификатора определяют время каждого пациента. Жёсткая маршрутизация (время группы с наибольшей
+# вероятностью) на странице показана справочно.
 # Этап 1 использует агломеративную кластеризацию всей когорты: STAGED_CLUSTERS кластеров, связь STAGED_LINKAGE,
 # 28 признаков при поступлении всех 1506 пациентов, без исходов; принадлежность — ближайший центроид. Принадлежность
 # к кластеру (one-hot) входит в логистическую регрессию вместе с признаками пациента. Кластеры — клинические фенотипы:
 # в кластере «анемия, ХБП, ФП, без стентирования» (100 пациентов) и «гипергликемия, диабет, лейкоцитоз» (78) — 10 из
 # 17 смертей от ССЗ в первые 10 дней, в основном кластере (945 пациентов) — 2. При кросс-валидации (5 разбиений ×
-# 5 фолдов, 326 обучающих balanced, 14 ранних смертей) кластеры снижают log-loss этапа 1 в каждом разбиении
-# (на 0,002) и повышают AUC на 0,012–0,024. Перебор: связи ward, average, complete; 4–64 кластера; one-hot или доля
-# ранних смертей в кластере как признак; только кластер или вместе с признаками. Доля ранних смертей в кластере
-# (target encoding) отвергнута: при 14 ранних смертях на 16 кластеров исключение собственного исхода пациента из доли
-# его кластера даёт отрицательный коэффициент и ненадёжный выигрыш. Для этапа 2 кластеры не помогают.
+# 5 фолдов, 1199 обучающих с известным статусом на 10-й день, 14 ранних смертей) кластеры снижают log-loss этапа 1
+# (0,0568 против 0,0574) в 23 из 25 фолдов и повышают AUC с 0,794 до 0,808; C = 0,03 — лучший из 0,01–0,3. Перебор
+# (на 326 обучающих df_balanced): связи ward, average, complete; 4–64 кластера; one-hot или доля ранних смертей
+# в кластере как признак; только кластер или вместе с признаками. Доля ранних смертей в кластере (target encoding)
+# отвергнута: при 14 ранних смертях на 16 кластеров исключение собственного исхода пациента из доли его кластера
+# даёт отрицательный коэффициент и ненадёжный выигрыш. Для этапа 2 кластеры не помогают.
 STAGED_EARLY_DAYS = 10
 STAGED_CLUSTERS = 8
 STAGED_LINKAGE = 'complete'
@@ -114,9 +138,9 @@ STAGED_GROUPS = ('early', 'late', 'survive')
 # среди SUDDEN_NEIGHBOURS самых похожих по признакам при поступлении пациентов с известным на этот срок исходом
 SUDDEN_MAX_DAY = 365
 SUDDEN_NEIGHBOURS = 50
-# Неожиданное выживание: нет смерти от ССЗ до τ, хотя модель по умолчанию для популяции balanced_dataset.csv
-# (многоэтапный конвейер: 1 − вероятность группы «жив дольше τ») оценивала риск смерти от ССЗ до τ не ниже UNEXPECTED_RISK; для сравнения — доля умерших от ССЗ до τ среди SUDDEN_NEIGHBOURS
-# самых похожих пациентов с известным к τ исходом
+# Неожиданное выживание: нет смерти от ССЗ до τ, хотя модель по умолчанию для balanced_dataset.csv (многоэтапный
+# конвейер: 1 − вероятность группы «жив дольше τ») оценивала риск смерти от ССЗ до τ не ниже UNEXPECTED_RISK; для
+# сравнения — доля умерших от ССЗ до τ среди SUDDEN_NEIGHBOURS самых похожих пациентов с известным к τ исходом
 UNEXPECTED_RISK = 0.5
 # Правдоподобные диапазоны значений: вне них — вероятная ошибка ввода (страница предупреждает о таких значениях)
 PLAUSIBLE = {'age': (18, 105), 'ef_hosp': (10, 80), 'bpm': (30, 220), 'sysAP': (60, 260), 'bmi': (15, 60),
@@ -127,7 +151,7 @@ PLAUSIBLE = {'age': (18, 105), 'ef_hosp': (10, 80), 'bpm': (30, 220), 'sysAP': (
 POST_DISCHARGE = ('doctor', 'llo')
 # Роль пациента в обучении (patients.split в docs/survival_model.js)
 SPLIT_CALIBRATION, SPLIT_TRAIN, SPLIT_TEST = 0, 1, 2
-SPLIT_NAMES = {SPLIT_CALIBRATION: 'обучающая выборка (только калибровка: цензурирован до τ)',
+SPLIT_NAMES = {SPLIT_CALIBRATION: 'обучающая выборка (цензурирован до τ)',
                SPLIT_TRAIN: 'обучающая выборка', SPLIT_TEST: 'отложенная выборка'}
 
 
@@ -173,12 +197,52 @@ def split_dataset(df):
 
 def split_cohort(full, df):
     """Разбиение всей когорты: df_balanced — как в ноутбуке; цензурированные до τ — тоже 80/20.
-    Возвращает (обучение моделей, только калибровка, отложенная выборка)."""
+    Возвращает (обучение моделей ноутбука, цензурированные до τ обучающие, отложенная выборка)."""
     from sklearn.model_selection import train_test_split
     bal_train, bal_test = split_dataset(df)
     censored_early = full.index.difference(df.index)
     cal_train, cal_test = train_test_split(censored_early, test_size=0.2, random_state=37)
     return bal_train, cal_train, bal_test.append(cal_test)
+
+
+def ipcw_weights(full, cohort_idx, idx):
+    """Веса IPCW пациентов df_balanced: 1 / G(min(T, τ) − 1), где G(t) — вероятность наблюдаться дольше t
+    (Каплан — Мейер по cohort_idx; выбывание — конец наблюдения без смерти от ССЗ), как в test_metrics.
+    df_balanced берёт всех умерших от ССЗ, а выживших — только включённых в исследование достаточно рано, чтобы
+    наблюдаться τ дней (G(τ) ≈ 0,19): выживший получает вес около 5, умерший на день T — 1 / G(T − 1)."""
+    from lifelines import KaplanMeierFitter
+    G = KaplanMeierFitter().fit(full.loc[cohort_idx, 'time'], 1 - full.loc[cohort_idx, 'target'])
+    t = np.minimum(full.loc[idx, 'time'].values.astype(float), TAU)
+    return pd.Series(1 / np.maximum(G.survival_function_at_times(t - 1).values, 1e-3), index=idx)
+
+
+def survival_share(full, features, scaler, known_idx, censored_idx, weights):
+    """Частичные метки (см. PSEUDO_NEIGHBOURS): для каждого цензурированного до τ пациента — q, доля доживших до τ
+    среди самых похожих на него пациентов known_idx (исход к τ известен), живых на день его выбывания C; weights —
+    веса IPCW пациентов known_idx. Пациент, похожий на выживших, получает q около 1, похожий на умерших — меньше."""
+    Z_known = scaler.transform(full.loc[known_idx, features])
+    Z_cens = scaler.transform(full.loc[censored_idx, features])
+    t_known = full.loc[known_idx, 'time'].values
+    survived = t_known >= TAU
+    w = weights.loc[known_idx].values
+    q = np.zeros(len(censored_idx))
+    for j, c in enumerate(full.loc[censored_idx, 'time'].values):
+        alive = np.flatnonzero(t_known > c)
+        near = alive[np.argsort(((Z_known[alive] - Z_cens[j]) ** 2).sum(axis=1), kind='stable')[:PSEUDO_NEIGHBOURS]]
+        q[j] = (w[near] * survived[near]).sum() / w[near].sum()
+    return pd.Series(q, index=censored_idx)
+
+
+def pseudo_labelled(full, known_idx, q):
+    """Обучающие строки «смерть от ССЗ до τ»: пациенты known_idx — с весом 1, цензурированные до τ (индекс q) —
+    дважды: выжившим с весом q и умершим до τ с весом 1 − q. Возвращает (ID пациентов, метки, веса)."""
+    time = full.loc[known_idx, 'time'].values
+    death = full.loc[known_idx, 'target'].values.astype(bool) & (time < TAU)
+    ids = np.concatenate([np.asarray(known_idx), np.asarray(q.index), np.asarray(q.index)])
+    label = np.concatenate([death, np.zeros(len(q), bool), np.ones(len(q), bool)])
+    weight = np.concatenate([np.ones(len(known_idx)), q.values, 1 - q.values])
+    keep = weight > 0
+    return ids[keep], label[keep], weight[keep]
 
 
 # ---------------------------------------------------------------------------
@@ -334,31 +398,38 @@ def library_cascade(cascade, X_sc, features):
 
 
 # ---------------------------------------------------------------------------
-# Двухэтапная модель для популяции balanced_dataset.csv
+# Balanced mixture: df_balanced и частичные метки цензурированных до τ
 # ---------------------------------------------------------------------------
-def train_balanced(df, features, train_idx, scaler):
-    """Логистическая регрессия «смерть от ССЗ до τ» на обучающих пациентах df_balanced."""
+def train_balanced(full, features, train_idx, scaler, q, weights):
+    """Логистическая регрессия «смерть от ССЗ до τ» на обучающих пациентах df_balanced (train_idx) и цензурированных
+    до τ с частичными метками q; weights — веса IPCW train_idx для распределения дней смерти F."""
     from sklearn.linear_model import LogisticRegression
-    time = df.loc[train_idx, 'time'].values.astype(float)
-    death = df.loc[train_idx, 'target'].values.astype(bool) & (time < TAU)
-    classifier = LogisticRegression(C=0.3, max_iter=5000).fit(scaler.transform(df.loc[train_idx, features]), death)
-    return dict(classifier=classifier, death_days=np.sort(time[death]).astype(int))
+    ids, label, weight = pseudo_labelled(full, train_idx, q)
+    classifier = LogisticRegression(C=0.3, max_iter=5000).fit(scaler.transform(full.loc[ids, features]), label,
+                                                              sample_weight=weight)
+    time = full.loc[train_idx, 'time'].values.astype(float)
+    death = full.loc[train_idx, 'target'].values.astype(bool) & (time < TAU)
+    order = np.argsort(time[death], kind='stable')
+    return dict(classifier=classifier, death_days=time[death][order].astype(int),
+                death_weights=weights.loc[train_idx].values[death][order])
 
 
-def balanced_mixture(p_death, death_days):
-    """S(t) = 1 − p · F(t), где F — доля умерших к дню t среди умерших от ССЗ до τ в обучающей выборке."""
-    F = (np.asarray(death_days)[None, :] <= GRID[:, None]).mean(axis=1)
+def balanced_mixture(p_death, death_days, death_weights):
+    """S(t) = 1 − p · F(t), где F — доля умерших к дню t среди умерших от ССЗ до τ в обучающей выборке с весами IPCW:
+    поздние смерти поздно включённых не наблюдаются, и вес поздних смертей больше."""
+    w = np.asarray(death_weights, dtype=float)
+    F = ((np.asarray(death_days)[None, :] <= GRID[:, None]) * w).sum(axis=1) / w.sum()
     return 1 - p_death[:, None] * F[None, :]
 
 
 def library_balanced(bm, X_sc):
     """(S(t), вероятность смерти от ССЗ до τ) средствами scikit-learn."""
     p = bm['classifier'].predict_proba(X_sc)[:, 1]
-    return balanced_mixture(p, bm['death_days']), p
+    return balanced_mixture(p, bm['death_days'], bm['death_weights']), p
 
 
 # ---------------------------------------------------------------------------
-# Многоэтапный конвейер для популяции balanced_dataset.csv
+# Многоэтапный конвейер
 # ---------------------------------------------------------------------------
 def staged_training_set(full, train_idx):
     """Шаги 1–3 (см. STAGED_EARLY_DAYS): вся когорта → без ранних смертей → правило balanced из ноутбука → обучающие
@@ -397,39 +468,40 @@ def _one_hot(cluster):
     return np.eye(STAGED_CLUSTERS)[cluster]
 
 
-def train_staged(full, df, features, train_idx, cohort_train_idx, scaler):
+def train_staged(full, features, train_idx, cohort_train_idx, scaler, q):
     """Этап 1 — логистическая регрессия «ранняя смерть» по признакам и принадлежности к кластеру всей когорты
-    (обучающие df_balanced); этап 2 — логистическая регрессия «смерть от ССЗ до τ» и модель Кокса времени поздней
-    смерти на новом balanced без ранних смертей."""
+    (все обучающие с известным статусом на 10-й день); этап 2 — логистическая регрессия «смерть от ССЗ до τ» на новом
+    balanced без ранних смертей (из train_idx) и частичных метках q цензурированных до τ; модель Кокса времени
+    поздней смерти — на всех обучающих (cohort_train_idx), переживших 10 дней."""
     from lifelines import CoxPHFitter
     from sklearn.linear_model import LogisticRegression
 
     clustering = staged_clustering(full, features)
-    # Для пояснения на странице: ранние смерти в кластерах среди всей обучающей когорты с известным статусом на 10-й день
     t_all = full.loc[cohort_train_idx, 'time'].values.astype(float)
-    early_all = full.loc[cohort_train_idx, 'target'].values.astype(bool) & (t_all <= STAGED_EARLY_DAYS)
+    death_all = full.loc[cohort_train_idx, 'target'].values.astype(bool)
+    early_all = death_all & (t_all <= STAGED_EARLY_DAYS)
     known = early_all | (t_all > STAGED_EARLY_DAYS)
-    c_all = cluster_of(clustering, full.loc[cohort_train_idx, features].values[known])
+    X_known = full.loc[cohort_train_idx, features].values[known]
+    c_all = cluster_of(clustering, X_known)
+    stage1 = LogisticRegression(C=0.03, max_iter=5000).fit(
+        np.column_stack([scaler.transform(X_known), _one_hot(c_all)]), early_all[known])
 
-    time = df.loc[train_idx, 'time'].values.astype(float)
-    early = df.loc[train_idx, 'target'].values.astype(bool) & (time <= STAGED_EARLY_DAYS)
-    Z = scaler.transform(df.loc[train_idx, features])
-    cluster = cluster_of(clustering, df.loc[train_idx, features].values)
-    stage1 = LogisticRegression(C=0.03, max_iter=5000).fit(np.column_stack([Z, _one_hot(cluster)]), early)
+    q_late = q[full.loc[q.index, 'time'] > STAGED_EARLY_DAYS]
+    ids, label, weight = pseudo_labelled(full, staged_training_set(full, train_idx), q_late)
+    stage2 = LogisticRegression(C=0.1, max_iter=5000).fit(scaler.transform(full.loc[ids, features]), label,
+                                                          sample_weight=weight)
 
-    late_idx = staged_training_set(full, train_idx)
-    Z_late = scaler.transform(full.loc[late_idx, features])
-    time_late = full.loc[late_idx, 'time'].values.astype(float)
-    death_late = full.loc[late_idx, 'target'].values.astype(bool) & (time_late < TAU)
-    stage2 = LogisticRegression(C=0.1, max_iter=5000).fit(Z_late, death_late)
-    # Признак без разброса на новом balanced (бинарный и редкий) модель Кокса не оценивает: его коэффициент — 0
+    late = t_all > STAGED_EARLY_DAYS
+    Z_late = scaler.transform(full.loc[cohort_train_idx[late], features])
+    # Признак без разброса (бинарный и редкий) модель Кокса не оценивает: его коэффициент — 0
     varying = [f for f, s in zip(features, Z_late.std(axis=0)) if s > 1e-9]
-    late_data = pd.DataFrame(Z_late, columns=features)[varying].assign(time=time_late, event=death_late.astype(int))
+    late_data = pd.DataFrame(Z_late, columns=features)[varying].assign(
+        time=t_all[late], event=(death_all[late] & (t_all[late] < TAU)).astype(int))
     late_cox = CoxPHFitter(penalizer=0.1).fit(late_data, duration_col='time', event_col='event')
     return dict(clustering=clustering, cluster_n=np.bincount(c_all, minlength=STAGED_CLUSTERS),
                 cluster_early=np.bincount(c_all, weights=early_all[known], minlength=STAGED_CLUSTERS).astype(int),
                 stage1=stage1, stage2=stage2, late_cox=late_cox, late_features=varying,
-                early_days=np.sort(time[early]).astype(int))
+                early_days=np.sort(t_all[early_all]).astype(int))
 
 
 def staged_mixture(p1, p2, early_days, S_late):
@@ -548,7 +620,8 @@ def export_params(df, features, train_idx, m, calibrators, ts, bm, st):
                    'calibrator': _export_cox(calibrators['rn'], ['score'])},
             'two': _export_cascade(ts, features),
             'bal': {'type': 'balanced_mixture', 'coef': _round(bm['classifier'].coef_[0], 10),
-                    'intercept': float(bm['classifier'].intercept_[0]), 'death_days': bm['death_days'].tolist()},
+                    'intercept': float(bm['classifier'].intercept_[0]), 'death_days': bm['death_days'].tolist(),
+                    'death_weights': _round(bm['death_weights'], 6)},
             'stg': _export_staged(st, features),
         },
     }
@@ -641,7 +714,7 @@ class SurvivalTimePredictor:
     def _balanced(self, X_sc):
         m = self.models['bal']
         p = 1 / (1 + np.exp(-(X_sc @ np.array(m['coef']) + m['intercept'])))
-        return balanced_mixture(p, m['death_days'])
+        return balanced_mixture(p, m['death_days'], m['death_weights'])
 
     def _two_stage(self, X_sc):
         m = self.models['two']
@@ -707,7 +780,7 @@ def point_prediction(S):
 # ---------------------------------------------------------------------------
 # Метрики на отложенной выборке с учётом цензурирования
 # ---------------------------------------------------------------------------
-def test_metrics(curves, time_obs, event_obs, time_train, event_train, ipcw=True):
+def test_metrics(curves, time_obs, event_obs, time_train, event_train):
     """Стандартные метрики моделей выживаемости на отложенной выборке.
 
     C-index — согласованность порядка пациентов по RMST(τ) с порядком событий. AUC 30 и 365 дней — различение
@@ -715,14 +788,13 @@ def test_metrics(curves, time_obs, event_obs, time_train, event_train, ipcw=True
     среднее Brier score по дням 30, 60, …, 1470) — точность самих вероятностей: 0 — идеально, 0,25 — константа 0,5.
     MAE — средняя абсолютная ошибка медианы S(t) относительно min(T, τ) у пациентов, у которых он известен.
     Ошибка калибровки RMST — среднее |прогноз − RMST Каплана — Мейера| по квинтилям прогноза.
-    ipcw=True — веса IPCW (обратная вероятность не быть цензурированным), чтобы пациенты, цензурированные раньше,
-    корректно входили в оценку всей когорты; ipcw=False — для balanced_dataset.csv, где исход к τ известен у всех."""
+    Веса IPCW (обратная вероятность не быть цензурированным) нужны, чтобы пациенты, цензурированные раньше,
+    корректно входили в оценку всей когорты."""
     from lifelines import KaplanMeierFitter
     from lifelines.utils import concordance_index, restricted_mean_survival_time
     from sklearn.metrics import roc_auc_score
     km_censoring = KaplanMeierFitter().fit(time_train, 1 - event_train)
-    G = (lambda t: np.maximum(km_censoring.survival_function_at_times(t).values, 1e-3)) if ipcw \
-        else (lambda t: np.ones(np.size(t)))
+    G = lambda t: np.maximum(km_censoring.survival_function_at_times(t).values, 1e-3)
 
     def weights_at(t):
         """Веса IPCW для оценки на день t: умершие к t — 1/G(T), прожившие дольше t — 1/G(t), прочие — 0."""
@@ -780,12 +852,16 @@ def cmd_export(args):
     train_all = bal_train.append(cal_train)
     print(f'Каскад: классификатор смерти от ССЗ ≤ {EARLY_DAYS} дн. и модель Кокса для остальных...')
     ts = train_cascade(full, mf, train_all, m['scaler'])
-    print('Модель для популяции balanced_dataset.csv...')
-    bm = train_balanced(df, mf, bal_train, m['scaler'])
+    weights = ipcw_weights(full, train_all, bal_train)
+    q = survival_share(full, mf, m['scaler'], bal_train, cal_train, weights)
+    print(f'Частичные метки {len(cal_train)} цензурированных до τ: q (доля доживших до τ среди {PSEUDO_NEIGHBOURS} похожих) '
+          f'в среднем {q.mean():.3f}, 5-й процентиль {q.quantile(0.05):.2f}, минимум {q.min():.2f}')
+    print('Balanced mixture...')
+    bm = train_balanced(full, mf, bal_train, m['scaler'], q, weights)
     staged_idx = staged_training_set(full, bal_train)
     print(f'Многоэтапный конвейер: новый balanced без смертей от ССЗ в первые {STAGED_EARLY_DAYS} дн. — '
-          f'{len(staged_idx)} обучающих пациентов из {len(bal_train)}...')
-    st = train_staged(full, df, mf, bal_train, bal_train.append(cal_train), m['scaler'])
+          f'{len(staged_idx)} обучающих пациентов из {len(bal_train)} и частичные метки...')
+    st = train_staged(full, mf, bal_train, train_all, m['scaler'], q)
 
     # Эталонный прогноз библиотек — для всех пациентов полного датасета
     X_all_sc = m['scaler'].transform(full[mf])
@@ -802,18 +878,14 @@ def cmd_export(args):
     print(f'Внезапных необъяснимых смертей от ССЗ (≤ {SUDDEN_MAX_DAY} дн., ни одна модель не предсказала): {int(sudden.sum())}; '
           f'неожиданных выживаний (риск по конвейеру ≥ {UNEXPECTED_RISK:.0%}): {int(unexpected.sum())}')
 
-    # Метрики — для каждой популяции на её отложенных пациентах: вся когорта (302, веса IPCW)
-    # и balanced_dataset.csv (82 отложенных пациента df_balanced, исход известен у всех)
-    def metrics_on(idx, ipcw):
-        pos = full.index.get_indexer(idx)
-        return test_metrics({k: S[pos] for k, S in reference.items()},
-                            full.loc[idx, 'time'].values.astype(float), full.loc[idx, 'target'].values.astype(bool),
-                            full.loc[train_all, 'time'].values.astype(float), full.loc[train_all, 'target'].values,
-                            ipcw=ipcw)
-    bal_test = df.index.intersection(test_idx)
-    metrics = {'full': metrics_on(test_idx, True), 'balanced': metrics_on(bal_test, False)}
-    km_s_tau = metrics['full'].pop('_km_s_tau')
-    metrics['balanced'].pop('_km_s_tau')
+    # Метрики — на отложенных пациентах всей когорты (302, веса IPCW) для обоих датасетов: все модели откалиброваны
+    # на всю когорту. Отложенные пациенты balanced_dataset.csv (82) отобраны по исходу (смертей от ССЗ 38% против 11%),
+    # без весов метрики на них оценивают не прогноз при поступлении, а эту выборку
+    pos = full.index.get_indexer(test_idx)
+    metrics = test_metrics({k: S[pos] for k, S in reference.items()},
+                           full.loc[test_idx, 'time'].values.astype(float), full.loc[test_idx, 'target'].values.astype(bool),
+                           full.loc[train_all, 'time'].values.astype(float), full.loc[train_all, 'target'].values)
+    km_s_tau = metrics.pop('_km_s_tau')
     cohort_km = KaplanMeierFitter().fit(full['time'], full['target'])
 
     # Пациенты — весь med_dataset_cardio.xlsx; balanced_dataset.csv — подмножество его строк
@@ -829,7 +901,7 @@ def cmd_export(args):
                  'cohort_s_tau': float(cohort_km.survival_function_at_times(TAU - 1).iloc[0]),
                  # профиль риска пациента «в среднем по когорте» (Каплан — Мейер) — для сравнения с профилем пациента
                  'cohort_windows': _round(window_probabilities(cohort_km.survival_function_at_times(GRID).values[None, :])[0], 4),
-                 'test_size': {'full': len(test_idx), 'balanced': len(bal_test)}, 'test_km_s_tau': km_s_tau,
+                 'test_size': len(test_idx), 'test_km_s_tau': km_s_tau,
                  'sudden_max_day': SUDDEN_MAX_DAY, 'sudden_neighbours': SUDDEN_NEIGHBOURS},
         'features': features,
         'model_features': mf,  # признаки моделей — без известных только после выписки
@@ -839,7 +911,7 @@ def cmd_export(args):
             'time': full['time'].astype(int).tolist(),
             'target': full['target'].astype(int).tolist(),
             'death_any': death_any.astype(int).tolist(),
-            'split': split.tolist(),  # 0 — только калибровка, 1 — обучение моделей и калибровка, 2 — отложенная выборка
+            'split': split.tolist(),  # 0 — обучающий, цензурирован до τ; 1 — обучающий из df_balanced; 2 — отложенная выборка
             'X': [_round(row, 10) for row in full[features].values],
             # Внезапная необъяснимая смерть: признак, срок сравнения, доля переживших его среди похожих пациентов
             'sudden': sudden.astype(int).tolist(),
@@ -866,18 +938,16 @@ def cmd_export(args):
 
     # Проверка: расчёт по экспортированным параметрам совпадает с библиотеками
     predictor = SurvivalTimePredictor(json.loads(json.dumps(bundle)))
-    for population, title in [('full', f'вся когорта: {len(test_idx)} отложенных, веса IPCW, S(τ) по Каплану — Мейеру {km_s_tau:.3f}'),
-                              ('balanced', f'balanced_dataset.csv: {len(bal_test)} отложенных, исход известен у всех')]:
-        print(f'\nОтложенная выборка — {title}')
-        print(f'{"модель":<19} {"C-index":>8} {"AUC 30":>7} {"AUC 365":>8} {"Brier τ":>8} {"IBS":>6} {"MAE":>7} '
-              f'{"калибр.":>8} {"ср. S(τ)":>9} {"max |ΔRMST|":>12}')
-        for name in MODEL_NAMES:
-            diff = np.abs(predictor.predict(full[features].values, name)['rmst'] - reference[name].sum(axis=1)).max()
-            r = metrics[population][name]
-            print(f'{MODEL_NAMES[name]:<19} {r["c_index"]:>8.4f} {r["auc_30"]:>7.3f} {r["auc_365"]:>8.3f} '
-                  f'{r["brier_s_tau"]:>8.3f} {r["ibs"]:>6.3f} {r["mae"]:>4.0f} дн {r["calibration_rmst"]:>5.0f} дн '
-                  f'{r["mean_s_tau"]:>9.3f} {diff:>12.2e}')
-            assert diff < 0.05, f'{name}: расчёт по параметрам расходится с библиотекой'
+    print(f'\nОтложенная выборка — вся когорта: {len(test_idx)} отложенных, веса IPCW, S(τ) по Каплану — Мейеру {km_s_tau:.3f}')
+    print(f'{"модель":<19} {"C-index":>8} {"AUC 30":>7} {"AUC 365":>8} {"Brier τ":>8} {"IBS":>6} {"MAE":>7} '
+          f'{"калибр.":>8} {"ср. S(τ)":>9} {"max |ΔRMST|":>12}')
+    for name in MODEL_NAMES:
+        diff = np.abs(predictor.predict(full[features].values, name)['rmst'] - reference[name].sum(axis=1)).max()
+        r = metrics[name]
+        print(f'{MODEL_NAMES[name]:<19} {r["c_index"]:>8.4f} {r["auc_30"]:>7.3f} {r["auc_365"]:>8.3f} '
+              f'{r["brier_s_tau"]:>8.3f} {r["ibs"]:>6.3f} {r["mae"]:>4.0f} дн {r["calibration_rmst"]:>5.0f} дн '
+              f'{r["mean_s_tau"]:>9.3f} {diff:>12.2e}')
+        assert diff < 0.05, f'{name}: расчёт по параметрам расходится с библиотекой'
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
