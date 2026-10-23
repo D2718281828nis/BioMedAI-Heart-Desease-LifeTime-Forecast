@@ -797,6 +797,42 @@
       n: fmtDays(meta.cv_size), folds: meta.cv_folds, d1: fmtDays(meta.cv_deaths[0]), d12: fmtDays(meta.cv_deaths[meta.cv_deaths.length - 1]),
       h: t(`profile.h${HORIZONS[j]}`).toLowerCase(), auc: I18N.fixed(cv.auc[j], 3), eo: I18N.fixed(cv.eo[j], 2),
     });
+    renderConfusion();
+  }
+
+  // Матрица ошибок групп риска для выбранной модели: группа по прогнозу на 12 месяцев (прогнозы вне выборки) против
+  // исхода к выбранному сроку. Группы «высокий» и «очень высокий» (риск ≥ второй границы групп) — прогноз смерти от ССЗ
+  const HIGH_GROUP = 2;
+  function renderConfusion() {
+    const m = state.model, j = state.horizon, h = t(`horizon.${HORIZONS[j]}`);
+    const matrix = BUNDLE.confusion[m][j];  // [группа] = [умерли от ССЗ к сроку, живы после срока, исход неизвестен]
+    const patientGroup = predictor.riskGroup(baseRisk[m][state.selected]);
+    const column = (c, rows = matrix) => rows.reduce((sum, row) => sum + row[c], 0);
+    const total = [0, 1, 2].map((c) => column(c));
+    $('confusion-title').textContent = t('confusion.title', { model: MODELS[m], h });
+    $('confusion-table').tHead.rows[0].replaceChildren(
+      el('th', { scope: 'col', text: t('calib.group') }), el('th', { scope: 'col', text: t('confusion.died', { h }) }),
+      el('th', { scope: 'col', text: t('confusion.alive', { h }) }), el('th', { scope: 'col', text: t('confusion.unknown') }),
+      el('th', { scope: 'col', text: t('confusion.total') }));
+    // Ячейка: число пациентов и доля в столбце; заливка — та же доля
+    const cell = (v, c) => el('td', { class: `cell ${c ? 'alive' : 'died'}`, style: `--share: ${total[c] ? (v / total[c]).toFixed(3) : 0}` },
+      fmtDays(v), total[c] ? el('small', { text: fmtPct(v / total[c]) }) : null);
+    $('confusion-table').tBodies[0].replaceChildren(...matrix.map((row, i) => el('tr', {
+      class: [i === patientGroup ? 'active' : '', i === HIGH_GROUP ? 'threshold' : ''].join(' ').trim() || null },
+    el('td', { text: t(`riskgroup.${i}`) }), cell(row[0], 0), cell(row[1], 1),
+    el('td', { text: fmtDays(row[2]) }), el('td', { text: fmtDays(row[0] + row[1] + row[2]) }))));
+    $('confusion-table').tFoot.rows[0].replaceChildren(el('td', { text: t('confusion.total') }),
+      ...total.map((v) => el('td', { text: fmtDays(v) })), el('td', { text: fmtDays(total[0] + total[1] + total[2]) }));
+
+    const high = matrix.slice(HIGH_GROUP), low = matrix.slice(0, HIGH_GROUP);
+    const tp = column(0, high), fp = column(1, high), fn = column(0, low), tn = column(1, low);
+    const share = (a, b) => (b ? fmtPct(a / b) : '—');
+    $('confusion-summary').textContent = t('confusion.summary', {
+      edge: fmtPct(BUNDLE.meta.risk_group_edges[HIGH_GROUP - 1]), h, sens: share(tp, tp + fn), tp: fmtDays(tp),
+      deaths: fmtDays(tp + fn), spec: share(tn, tn + fp), pos: fmtDays(tp + fp), ppv: share(tp, tp + fp),
+      neg: fmtDays(tn + fn), npv: share(tn, tn + fn),
+    });
+    $('confusion-note').textContent = t('confusion.note', { n: fmtDays(BUNDLE.meta.cv_size) });
   }
 
   function renderMiniSummary() {

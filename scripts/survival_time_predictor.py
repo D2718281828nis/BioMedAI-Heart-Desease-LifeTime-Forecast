@@ -940,6 +940,18 @@ def risk_group_calibration(S, time, event):
     return out
 
 
+def risk_group_confusion(S, time, event):
+    """Матрица ошибок групп риска (risk_group по прогнозу на 12 месяцев): для каждого срока HORIZONS и каждой группы —
+    [умерли от ССЗ к сроку, живы после срока, выбыли раньше срока без смерти от ССЗ (исход к сроку неизвестен)]."""
+    group = risk_group(horizon_risks(S)[:, -1])
+    out = []
+    for h in HORIZONS:
+        died, alive = event & (time <= h), time > h
+        out.append([[int((died & (group == g)).sum()), int((alive & (group == g)).sum()),
+                     int((~died & ~alive & (group == g)).sum())] for g in range(len(RISK_GROUP_EDGES) + 1)])
+    return out
+
+
 def train_all_models(full, df, features, bal_train, cal_train, log=lambda *a: None):
     """Все восемь моделей: модели ноутбука на bal_train (df_balanced) с калибровкой S(t) на всей обучающей когорте,
     каскад, Balanced mixture и конвейер с частичными метками цензурированных до τ (cal_train)."""
@@ -1033,6 +1045,7 @@ def cmd_export(args):
     metrics_cv.pop('_km_s_tau')
     cv_deaths = metrics_cv.pop('_deaths')
     calibration = {k: risk_group_calibration(S, t_all, e_all) for k, S in oof.items()}
+    confusion = {k: risk_group_confusion(S, t_all, e_all) for k, S in oof.items()}
 
     # Пациенты — весь med_dataset_cardio.xlsx; balanced_dataset.csv — подмножество его строк
     split = np.full(len(full), SPLIT_TEST)
@@ -1082,6 +1095,7 @@ def cmd_export(args):
         'metrics': metrics,          # 302 отложенных пациента всей когорты
         'metrics_cv': metrics_cv,    # прогнозы вне выборки на обучающей когорте
         'calibration': calibration,  # прогноз и факт по группам риска, прогнозы вне выборки
+        'confusion': confusion,      # матрица ошибок групп риска: [срок][группа] = [умерли, живы, исход неизвестен]
         # Прогноз по самим библиотекам — эталон для проверки JavaScript-расчёта (scripts/check_js_predictor.js)
         'reference_rmst': {k: _round(S.sum(axis=1), 9) for k, S in reference.items()},
         'reference_time': {k: p['time'].tolist() for k, p in reference_pred.items()},
@@ -1109,6 +1123,15 @@ def cmd_export(args):
         for label, g in zip(labels, calibration[name]):
             cells = '  '.join(f'{p:.1%}/{o:.1%}' for p, o in zip(g['pred'], g['obs'])) if g['n'] else '—'
             print(f'    {label:>7}: {g["n"]:>4} пациентов, смертей за год {g["deaths"]:>3}:  {cells}')
+    print(f'\nМатрица ошибок за 12 мес. (вне выборки): «высокий» и «очень высокий» (риск ≥ {RISK_GROUP_EDGES[1]:.0%}) '
+          f'как прогноз смерти от ССЗ')
+    for name in MODEL_NAMES:
+        cm = np.array(confusion[name][-1])
+        tp, fp = cm[2:, 0].sum(), cm[2:, 1].sum()
+        fn, tn = cm[:2, 0].sum(), cm[:2, 1].sum()
+        print(f'  {MODEL_NAMES[name]:<19} умерли по группам {cm[:, 0].tolist()}, живы {cm[:, 1].tolist()}: '
+              f'чувствительность {tp / (tp + fn):.0%}, специфичность {tn / (tn + fp):.0%}, PPV {tp / (tp + fp):.0%}, '
+              f'NPV {tn / (tn + fn):.1%}')
     for name in MODEL_NAMES:
         diff = np.abs(predictor.predict(full[features].values, name)['rmst'] - reference[name].sum(axis=1)).max()
         assert diff < 0.05, f'{name}: расчёт по параметрам расходится с библиотекой (max |ΔRMST| = {diff:.2e})'

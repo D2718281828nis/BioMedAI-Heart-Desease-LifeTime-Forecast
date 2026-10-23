@@ -89,6 +89,7 @@
   .top { display: flex; gap: 16px; align-items: flex-start; justify-content: space-between; }
   h1 { font-size: 22px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 4px; }
   .lede { margin: 0; color: var(--ink-2); max-width: 88ch; }
+  .lede b { color: var(--ink); font-weight: 600; }
 
   input[type="range"] { accent-color: var(--ink-2); min-width: 0; }
   input[type="number"], select {
@@ -257,6 +258,16 @@
   .calib-table tbody tr { cursor: default; }
   .calib-table tbody tr:hover { background: none; }
   .calib-table td.active, .calib-table th.active { background: var(--wash); }
+  /* Матрица ошибок: заливка ячейки — доля столбца; пунктир — порог «высокий и выше» */
+  .confusion-table td.cell { --share: 0; }
+  .confusion-table td.died { background: color-mix(in srgb, var(--t1) calc(var(--share) * 45%), transparent); }
+  .confusion-table td.alive { background: color-mix(in srgb, var(--t0) calc(var(--share) * 45%), transparent); }
+  .confusion-table td small { color: var(--ink-2); font-size: 11.5px; margin-left: 4px; }
+  .confusion-table tr.threshold td { border-top: 2px dashed var(--ink-2); }
+  .confusion-table tr.active td:first-child { box-shadow: inset 3px 0 0 var(--ink); }
+  .confusion-table tfoot td { color: var(--ink-2); border-bottom: 0; }
+  #confusion-summary { color: var(--ink-2); font-size: 13px; }
+  #confusion-summary b { color: var(--ink); font-weight: 600; }
 
   /* Редактор параметров */
   .patient-bar { display: grid; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
@@ -434,6 +445,18 @@
           </table>
         </div>
         <p class="chart-note" id="calib-note"></p>
+      </div>
+      <div class="calib" id="confusion">
+        <div class="profile-title" id="confusion-title"></div>
+        <div class="table-scroll">
+          <table class="models calib-table confusion-table" id="confusion-table">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+            <tfoot><tr></tr></tfoot>
+          </table>
+        </div>
+        <p class="chart-note" id="confusion-summary"></p>
+        <p class="chart-note" id="confusion-note"></p>
       </div>
     </section>
 
