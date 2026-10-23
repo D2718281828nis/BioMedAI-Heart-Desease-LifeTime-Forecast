@@ -800,39 +800,62 @@
     renderConfusion();
   }
 
-  // Матрица ошибок групп риска для выбранной модели: группа по прогнозу на 12 месяцев (прогнозы вне выборки) против
-  // исхода к выбранному сроку. Группы «высокий» и «очень высокий» (риск ≥ второй границы групп) — прогноз смерти от ССЗ
-  const HIGH_GROUP = 2;
+  // Матрица ошибок групп риска за 12 месяцев для выбранной модели: строка — группа по прогнозу (вне выборки), столбец —
+  // по «реальному» риску (доля умерших от ССЗ среди похожих пациентов); справа и снизу — фактическая смертность
   function renderConfusion() {
-    const m = state.model, j = state.horizon, h = t(`horizon.${HORIZONS[j]}`);
-    const matrix = BUNDLE.confusion[m][j];  // [группа] = [умерли от ССЗ к сроку, живы после срока, исход неизвестен]
-    const patientGroup = predictor.riskGroup(baseRisk[m][state.selected]);
-    const column = (c, rows = matrix) => rows.reduce((sum, row) => sum + row[c], 0);
-    const total = [0, 1, 2].map((c) => column(c));
-    $('confusion-title').textContent = t('confusion.title', { model: MODELS[m], h });
-    $('confusion-table').tHead.rows[0].replaceChildren(
-      el('th', { scope: 'col', text: t('calib.group') }), el('th', { scope: 'col', text: t('confusion.died', { h }) }),
-      el('th', { scope: 'col', text: t('confusion.alive', { h }) }), el('th', { scope: 'col', text: t('confusion.unknown') }),
-      el('th', { scope: 'col', text: t('confusion.total') }));
-    // Ячейка: число пациентов и доля в столбце; заливка — та же доля
-    const cell = (v, c) => el('td', { class: `cell ${c ? 'alive' : 'died'}`, style: `--share: ${total[c] ? (v / total[c]).toFixed(3) : 0}` },
-      fmtDays(v), total[c] ? el('small', { text: fmtPct(v / total[c]) }) : null);
-    $('confusion-table').tBodies[0].replaceChildren(...matrix.map((row, i) => el('tr', {
-      class: [i === patientGroup ? 'active' : '', i === HIGH_GROUP ? 'threshold' : ''].join(' ').trim() || null },
-    el('td', { text: t(`riskgroup.${i}`) }), cell(row[0], 0), cell(row[1], 1),
-    el('td', { text: fmtDays(row[2]) }), el('td', { text: fmtDays(row[0] + row[1] + row[2]) }))));
-    $('confusion-table').tFoot.rows[0].replaceChildren(el('td', { text: t('confusion.total') }),
-      ...total.map((v) => el('td', { text: fmtDays(v) })), el('td', { text: fmtDays(total[0] + total[1] + total[2]) }));
+    const m = state.model, g = state.selected, conf = BUNDLE.confusion;
+    const cells = conf.models[m].cells;  // [прогноз][«реальная»] = [пациентов, умерли от ССЗ за 12 мес., исход известен]
+    const K = cells.length, groups = [...Array(K).keys()];
+    const add = (a, b) => a.map((v, k) => v + b[k]);
+    const sumOf = (list) => list.reduce(add, [0, 0, 0]);
+    const rowSum = groups.map((i) => sumOf(cells[i]));
+    const colSum = groups.map((j) => sumOf(groups.map((i) => cells[i][j])));
+    const total = sumOf(rowSum);
+    const where = (test) => sumOf(groups.flatMap((i) => groups.filter((j) => test(i, j)).map((j) => cells[i][j])));
+    const rate = ([, died, known]) => (known ? fmtPct(died / known) : '—');
+    const label = (i) => t(`riskgroup.${i}`);
+    const patientRow = predictor.riskGroup(baseRisk[m][g]), patientCol = predictor.riskGroup(PATIENTS.real_risk[g]);
 
-    const high = matrix.slice(HIGH_GROUP), low = matrix.slice(0, HIGH_GROUP);
-    const tp = column(0, high), fp = column(1, high), fn = column(0, low), tn = column(1, low);
-    const share = (a, b) => (b ? fmtPct(a / b) : '—');
+    $('confusion-title').textContent = t('confusion.title', { model: MODELS[m] });
+    $('confusion-table').tHead.rows[0].replaceChildren(
+      el('th', { scope: 'col', text: t('confusion.corner') }),
+      ...groups.map((j) => el('th', { scope: 'col', class: j === patientCol ? 'active' : null, text: label(j) })),
+      el('th', { scope: 'col', text: t('confusion.total') }), el('th', { scope: 'col', class: 'fact', text: t('confusion.died') }));
+    // Ячейка: число пациентов и доля умерших среди них; заливка — доля пациентов строки
+    $('confusion-table').tBodies[0].replaceChildren(...groups.map((i) => el('tr', { class: i === patientRow ? 'active' : null },
+      el('td', { text: label(i) }),
+      ...groups.map((j) => el('td', {
+        class: ['cell', i === j ? 'diag' : '', i === patientRow && j === patientCol ? 'patient' : ''].join(' ').trim(),
+        style: `--share: ${rowSum[i][0] ? (cells[i][j][0] / rowSum[i][0]).toFixed(3) : 0}`,
+      }, fmtDays(cells[i][j][0]), cells[i][j][2] ? el('small', { text: rate(cells[i][j]) }) : null)),
+      el('td', { text: fmtDays(rowSum[i][0]) }),
+      el('td', { class: 'fact', text: rate(rowSum[i]) }))));
+    $('confusion-table').tFoot.replaceChildren(
+      el('tr', {}, el('td', { text: t('confusion.total') }), ...colSum.map((c) => el('td', { text: fmtDays(c[0]) })),
+        el('td', { text: fmtDays(total[0]) }), el('td', { class: 'fact', text: rate(total) })),
+      el('tr', {}, el('td', { text: t('confusion.died') }), ...colSum.map((c) => el('td', { text: rate(c) })),
+        el('td', {}), el('td', { class: 'fact' })));
+
+    // Взвешенная (квадратичная) каппа Коэна: согласие групп с поправкой на случайное совпадение
+    let disagreement = 0, chance = 0;
+    for (const i of groups) {
+      for (const j of groups) {
+        const w = ((i - j) / (K - 1)) ** 2;
+        disagreement += w * cells[i][j][0];
+        chance += w * rowSum[i][0] * colSum[j][0] / total[0];
+      }
+    }
+    const agree = where((i, j) => i === j);
     $('confusion-summary').textContent = t('confusion.summary', {
-      edge: fmtPct(BUNDLE.meta.risk_group_edges[HIGH_GROUP - 1]), h, sens: share(tp, tp + fn), tp: fmtDays(tp),
-      deaths: fmtDays(tp + fn), spec: share(tn, tn + fp), pos: fmtDays(tp + fp), ppv: share(tp, tp + fp),
-      neg: fmtDays(tn + fn), npv: share(tn, tn + fn),
+      agree: fmtPct(agree[0] / total[0]), near: fmtPct(where((i, j) => Math.abs(i - j) === 1)[0] / total[0]),
+      kappa: I18N.fixed(1 - disagreement / chance, 2), k: conf.neighbours,
+      auc: I18N.fixed(conf.models[m].auc, 2), aucReal: I18N.fixed(conf.real_auc, 2),
+      up: rate(where((i, j) => i > j)), down: rate(where((i, j) => i < j)), same: rate(agree),
+    }) + ' ' + t('confusion.patient', {
+      id: PATIENTS.id[g], pred: fmtPct(baseRisk[m][g]), predGroup: label(patientRow), k: conf.neighbours,
+      real: fmtPct(PATIENTS.real_risk[g]), realGroup: label(patientCol),
     });
-    $('confusion-note').textContent = t('confusion.note', { n: fmtDays(BUNDLE.meta.cv_size) });
+    $('confusion-note').textContent = t('confusion.note', { k: conf.neighbours, n: fmtDays(total[0]) });
   }
 
   function renderMiniSummary() {

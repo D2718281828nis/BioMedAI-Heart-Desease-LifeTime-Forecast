@@ -164,6 +164,13 @@ SUDDEN_NEIGHBOURS = 50
 # с известным к τ исходом. Порог 50% — выживание было менее вероятно, чем смерть; у группы «очень высокий» (риск за
 # 12 месяцев ≥ 25%, в среднем 34%) год переживают 60% — для неё выживание ожидаемо
 UNEXPECTED_RISK = 0.5
+# Матрица ошибок групп риска: строка — группа по прогнозу модели на 12 месяцев, столбец — по «реальному» риску. Риск
+# отдельного пациента не наблюдается (он либо умирает, либо нет), поэтому «реальный» риск — доля умерших от ССЗ за
+# 12 месяцев среди REAL_RISK_NEIGHBOURS самых похожих при поступлении пациентов (28 стандартизованных признаков,
+# исход за 12 месяцев известен, сам пациент не входит). Эта оценка грубее моделей: смерти за 12 месяцев она различает
+# с AUC 0,69 против 0,74–0,79 у прогнозов вне выборки и сглаживает крайние значения (в «очень высокий» попадают
+# единицы пациентов), поэтому вместе с матрицей показывается фактическая смертность по строкам и столбцам
+REAL_RISK_NEIGHBOURS = 50
 # Правдоподобные диапазоны значений: вне них — вероятная ошибка ввода (страница предупреждает о таких значениях)
 PLAUSIBLE = {'age': (18, 105), 'ef_hosp': (10, 80), 'bpm': (30, 220), 'sysAP': (60, 260), 'bmi': (15, 60),
              'hb': (60, 200), 'leukoc': (1, 50), 'tromboc': (20, 1000), 't_chol': (1, 15), 'ldl': (0.3, 12),
@@ -940,15 +947,41 @@ def risk_group_calibration(S, time, event):
     return out
 
 
-def risk_group_confusion(S, time, event):
-    """Матрица ошибок групп риска (risk_group по прогнозу на 12 месяцев): для каждого срока HORIZONS и каждой группы —
-    [умерли от ССЗ к сроку, живы после срока, выбыли раньше срока без смерти от ССЗ (исход к сроку неизвестен)]."""
-    group = risk_group(horizon_risks(S)[:, -1])
-    out = []
-    for h in HORIZONS:
-        died, alive = event & (time <= h), time > h
-        out.append([[int((died & (group == g)).sum()), int((alive & (group == g)).sum()),
-                     int((~died & ~alive & (group == g)).sum())] for g in range(len(RISK_GROUP_EDGES) + 1)])
+def similar_patients_risk(full, model_feature_names, horizon=HORIZONS[-1]):
+    """«Реальный» риск каждого пациента (см. REAL_RISK_NEIGHBOURS): доля умерших от ССЗ к сроку horizon среди самых
+    похожих при поступлении пациентов с известным к этому сроку исходом; сам пациент не входит."""
+    time = full['time'].values
+    event = full['target'].values.astype(bool)
+    X = full[model_feature_names].values
+    Z = (X - X.mean(axis=0)) / X.std(axis=0)
+    died = event & (time <= horizon)
+    known = np.flatnonzero(died | (time > horizon))
+    risk = np.zeros(len(time))
+    for g in range(len(time)):
+        pool = known[known != g]
+        nearest = pool[np.argsort(((Z[pool] - Z[g]) ** 2).sum(axis=1), kind='stable')[:REAL_RISK_NEIGHBOURS]]
+        risk[g] = died[nearest].mean()
+    return risk
+
+
+def risk_group_agreement(curves, real_risk, time, event):
+    """Матрица ошибок групп риска за 12 месяцев: группа по прогнозу модели (строка) × группа по «реальному» риску
+    similar_patients_risk (столбец); в ячейке [пациентов, умерли от ССЗ за 12 месяцев, исход за 12 месяцев известен].
+    AUC прогноза и «реального» риска — для смерти от ССЗ за 12 месяцев у пациентов с известным исходом."""
+    from sklearn.metrics import roc_auc_score
+    h = HORIZONS[-1]
+    died = event & (time <= h)
+    known = died | (time > h)
+    real = risk_group(real_risk)
+    k = len(RISK_GROUP_EDGES) + 1
+    out = {'neighbours': REAL_RISK_NEIGHBOURS, 'horizon': h,
+           'real_auc': float(roc_auc_score(died[known], real_risk[known])), 'models': {}}
+    for name, S in curves.items():
+        risk = 1 - S[:, h]
+        pred = risk_group(risk)
+        cells = [[[int(((pred == i) & (real == j)).sum()), int(((pred == i) & (real == j) & died).sum()),
+                   int(((pred == i) & (real == j) & known).sum())] for j in range(k)] for i in range(k)]
+        out['models'][name] = {'auc': float(roc_auc_score(died[known], risk[known])), 'cells': cells}
     return out
 
 
@@ -1045,7 +1078,8 @@ def cmd_export(args):
     metrics_cv.pop('_km_s_tau')
     cv_deaths = metrics_cv.pop('_deaths')
     calibration = {k: risk_group_calibration(S, t_all, e_all) for k, S in oof.items()}
-    confusion = {k: risk_group_confusion(S, t_all, e_all) for k, S in oof.items()}
+    real_risk = similar_patients_risk(full, mf)
+    confusion = risk_group_agreement(oof, real_risk[full.index.get_indexer(train_all)], t_all, e_all)
 
     # Пациенты — весь med_dataset_cardio.xlsx; balanced_dataset.csv — подмножество его строк
     split = np.full(len(full), SPLIT_TEST)
@@ -1086,6 +1120,8 @@ def cmd_export(args):
             'unexpected_risk': _round(np.where(unexpected, p_death_staged, 0), 3),
             'unexpected_consensus': _round(np.where(unexpected, consensus_tau, 0), 3),
             'unexpected_died': _round(unexpected_died, 3),
+            # «Реальный» риск смерти от ССЗ за 12 месяцев: доля умерших среди самых похожих пациентов (матрица ошибок)
+            'real_risk': _round(real_risk, 3),
         },
         'datasets': {
             'balanced': {'file': BALANCED_CSV.name, 'rows': full.index.get_indexer(df.index).tolist()},
@@ -1095,7 +1131,7 @@ def cmd_export(args):
         'metrics': metrics,          # 302 отложенных пациента всей когорты
         'metrics_cv': metrics_cv,    # прогнозы вне выборки на обучающей когорте
         'calibration': calibration,  # прогноз и факт по группам риска, прогнозы вне выборки
-        'confusion': confusion,      # матрица ошибок групп риска: [срок][группа] = [умерли, живы, исход неизвестен]
+        'confusion': confusion,      # матрица ошибок групп риска: прогноз × «реальный» риск по похожим пациентам
         # Прогноз по самим библиотекам — эталон для проверки JavaScript-расчёта (scripts/check_js_predictor.js)
         'reference_rmst': {k: _round(S.sum(axis=1), 9) for k, S in reference.items()},
         'reference_time': {k: p['time'].tolist() for k, p in reference_pred.items()},
@@ -1123,15 +1159,15 @@ def cmd_export(args):
         for label, g in zip(labels, calibration[name]):
             cells = '  '.join(f'{p:.1%}/{o:.1%}' for p, o in zip(g['pred'], g['obs'])) if g['n'] else '—'
             print(f'    {label:>7}: {g["n"]:>4} пациентов, смертей за год {g["deaths"]:>3}:  {cells}')
-    print(f'\nМатрица ошибок за 12 мес. (вне выборки): «высокий» и «очень высокий» (риск ≥ {RISK_GROUP_EDGES[1]:.0%}) '
-          f'как прогноз смерти от ССЗ')
+    print(f'\nМатрица ошибок за 12 мес. (вне выборки): прогнозная группа × «реальная» по {REAL_RISK_NEIGHBOURS} похожим; '
+          f'AUC «реального» риска {confusion["real_auc"]:.3f}')
     for name in MODEL_NAMES:
-        cm = np.array(confusion[name][-1])
-        tp, fp = cm[2:, 0].sum(), cm[2:, 1].sum()
-        fn, tn = cm[:2, 0].sum(), cm[:2, 1].sum()
-        print(f'  {MODEL_NAMES[name]:<19} умерли по группам {cm[:, 0].tolist()}, живы {cm[:, 1].tolist()}: '
-              f'чувствительность {tp / (tp + fn):.0%}, специфичность {tn / (tn + fp):.0%}, PPV {tp / (tp + fp):.0%}, '
-              f'NPV {tn / (tn + fn):.1%}')
+        cells = np.array(confusion['models'][name]['cells'])  # прогноз × «реальная» × [n, умерли, известен]
+        i, j = np.indices(cells.shape[:2])
+        rate = lambda mask: cells[mask][:, 1].sum() / max(cells[mask][:, 2].sum(), 1)
+        print(f'  {MODEL_NAMES[name]:<19} AUC {confusion["models"][name]["auc"]:.3f}; совпадение '
+              f'{cells[i == j][:, 0].sum() / cells[..., 0].sum():.0%}; умерли за год: модель выше похожих {rate(i > j):.1%}, '
+              f'совпали {rate(i == j):.1%}, модель ниже {rate(i < j):.1%}')
     for name in MODEL_NAMES:
         diff = np.abs(predictor.predict(full[features].values, name)['rmst'] - reference[name].sum(axis=1)).max()
         assert diff < 0.05, f'{name}: расчёт по параметрам расходится с библиотекой (max |ΔRMST| = {diff:.2e})'

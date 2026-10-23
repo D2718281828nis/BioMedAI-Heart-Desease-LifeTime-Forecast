@@ -258,14 +258,16 @@
   .calib-table tbody tr { cursor: default; }
   .calib-table tbody tr:hover { background: none; }
   .calib-table td.active, .calib-table th.active { background: var(--wash); }
-  /* Матрица ошибок: заливка ячейки — доля столбца; пунктир — порог «высокий и выше» */
-  .confusion-table td.cell { --share: 0; }
-  .confusion-table td.died { background: color-mix(in srgb, var(--t1) calc(var(--share) * 45%), transparent); }
-  .confusion-table td.alive { background: color-mix(in srgb, var(--t0) calc(var(--share) * 45%), transparent); }
-  .confusion-table td small { color: var(--ink-2); font-size: 11.5px; margin-left: 4px; }
-  .confusion-table tr.threshold td { border-top: 2px dashed var(--ink-2); }
+  /* Матрица ошибок: заливка — доля пациентов строки, рамка — диагональ (совпадение групп), справа и снизу —
+     фактическая смертность; ячейка выбранного пациента обведена */
+  .confusion-table td.cell { --share: 0; background: color-mix(in srgb, var(--t0) calc(var(--share) * 55%), transparent); }
+  .confusion-table td.diag { box-shadow: inset 0 0 0 1.5px var(--ink-2); }
+  .confusion-table td.patient { box-shadow: inset 0 0 0 2.5px var(--edit); }
+  .confusion-table td small { display: block; color: var(--ink-2); font-size: 11px; font-weight: 400; }
+  .confusion-table td.fact, .confusion-table th.fact { border-left: 1px solid var(--axis); }
+  .confusion-table tfoot td { color: var(--ink-2); }
+  .confusion-table tfoot tr:last-child td { border-bottom: 0; }
   .confusion-table tr.active td:first-child { box-shadow: inset 3px 0 0 var(--ink); }
-  .confusion-table tfoot td { color: var(--ink-2); border-bottom: 0; }
   #confusion-summary { color: var(--ink-2); font-size: 13px; }
   #confusion-summary b { color: var(--ink); font-weight: 600; }
 
@@ -452,7 +454,7 @@
           <table class="models calib-table confusion-table" id="confusion-table">
             <thead><tr></tr></thead>
             <tbody></tbody>
-            <tfoot><tr></tr></tfoot>
+            <tfoot></tfoot>
           </table>
         </div>
         <p class="chart-note" id="confusion-summary"></p>
