@@ -194,7 +194,7 @@
   .facts small { display: block; color: var(--muted); font-size: 12px; font-weight: 400; }
   .facts .fact-text { display: block; font-size: 15px; line-height: 1.3; }
 
-  /* Вероятности окон времени смерти от ССЗ */
+  /* Риски смерти от ССЗ к срокам */
   .risk-profile { display: grid; gap: 6px; margin-top: 16px; }
   .profile-title { color: var(--ink-2); font-size: 13px; }
   .profile-row {
@@ -209,6 +209,9 @@
   .profile-cohort { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; background: var(--ink); border-radius: 1px; }
   .profile-row b { grid-area: value; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
   .profile-row small { grid-area: note; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .profile-group { font-size: 13px; color: var(--ink-2); }
+  .profile-group b { color: var(--ink); font-weight: 600; }
+  .profile-outcome { font-size: 13px; color: var(--ink-2); margin-top: 2px; }
   @media (max-width: 640px) {
     .profile-row { grid-template-columns: minmax(0, 1fr) 4em; grid-template-areas: "label value" "track track" "note note"; }
   }
@@ -247,6 +250,13 @@
   .models label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
   .models input[type="radio"] { accent-color: var(--ink); margin: 0; }
   .table-scroll { overflow-x: auto; }
+  .horizon-bar { display: flex; align-items: center; gap: 8px; margin-top: 14px; color: var(--ink-2); font-size: 13px; }
+  .horizon-bar + .table-scroll .models { margin-top: 6px; }
+  .calib { margin-top: 18px; }
+  .calib-table { margin-top: 6px; }
+  .calib-table tbody tr { cursor: default; }
+  .calib-table tbody tr:hover { background: none; }
+  .calib-table td.active, .calib-table th.active { background: var(--wash); }
 
   /* Редактор параметров */
   .patient-bar { display: grid; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
@@ -394,16 +404,19 @@
       <div class="chart" id="survival-chart"></div>
       <div class="chart-legend" id="survival-legend"></div>
       <p class="chart-note" data-i18n-html="chart.note"></p>
+      <div class="horizon-bar">
+        <label for="horizon-select" data-i18n="models.horizon"></label>
+        <select id="horizon-select"></select>
+      </div>
       <div class="table-scroll">
         <table class="models" id="model-table" data-i18n-aria-label="models.aria">
           <thead>
             <tr>
               <th scope="col" data-i18n="models.model"></th>
               <th scope="col" data-i18n="models.cindex"></th>
-              <th scope="col" data-i18n="models.auc30"></th>
-              <th scope="col" data-i18n="models.auc365"></th>
+              <th scope="col" data-i18n="models.auc"></th>
+              <th scope="col" data-i18n="models.eo"></th>
               <th scope="col" data-i18n="models.ibs"></th>
-              <th scope="col" data-i18n="models.mae"></th>
               <th scope="col" data-i18n="models.base"></th>
               <th scope="col" data-i18n="models.edit"></th>
             </tr>
@@ -412,6 +425,16 @@
         </table>
       </div>
       <p class="chart-note" id="models-note"></p>
+      <div class="calib" id="calibration">
+        <div class="profile-title" id="calib-title"></div>
+        <div class="table-scroll">
+          <table class="models calib-table" id="calib-table">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="chart-note" id="calib-note"></p>
+      </div>
     </section>
 
     <section class="card" id="editor-card" aria-labelledby="patient-title">

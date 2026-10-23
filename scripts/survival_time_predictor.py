@@ -19,11 +19,11 @@
 df_balanced — 88 из 408 (21,6%). Функции выживаемости, оценённые на df_balanced, поэтому сильно занижены: средний
 прогноз S(τ) 0,63–0,72 против 0,88 по Каплану — Мейеру на отложенных пациентах.
 
-Модели ноутбука по-прежнему обучаются на df_balanced, а переход от оценки риска модели к S(t) — калибратор Кокса
-(для Weibull AFT — Weibull) с одной ковариатой s: S(t | s) = S₀(t)^exp(c·s) — обучается на всей обучающей когорте
-med_dataset_cardio.xlsx с учётом цензурирования. Оценки риска для пациентов df_balanced при этом берутся вне выборки
-(5 фолдов). Для нейросетей оценка риска — логит, а не вероятность: вероятность насыщается у 1 и сжимает прогноз
-у пациентов высокого риска.
+Модели ноутбука по-прежнему обучаются на df_balanced, а переход от оценки риска модели s к S(t) — калибратор Кокса
+(для Weibull AFT — Weibull) S(t | s) = S₀(t)^exp(b₁·s + b₂·(s − s̄)²) (см. QUADRATIC_CALIBRATION) — обучается на всей
+обучающей когорте med_dataset_cardio.xlsx с учётом цензурирования. Оценки риска для пациентов df_balanced при этом
+берутся вне выборки (5 фолдов). Для нейросетей оценка риска — логит, а не вероятность: вероятность насыщается у 1
+и сжимает прогноз у пациентов высокого риска.
 
 Balanced mixture и Staged pipeline учат «смерть от ССЗ до τ» — исход, который у цензурированных до τ неизвестен.
 Рано и поздно включённые пациенты различаются и по признакам при поступлении (AUC 0,70: у включённых рано выше
@@ -64,11 +64,17 @@ JS_PREFIX = 'window.SURVIVAL_MODEL = '
 # Горизонт τ и дневная сетка — как в ноутбуке
 TAU = 1500
 GRID = np.arange(TAU)
-# Окна времени профиля риска: смерть от ССЗ в первые 30 дней, на 31–90-й, 91–365-й, 366–1499-й день, нет смерти до τ.
-# Прогноз модели — распределение времени, а не дата: точный день смерти по данным при поступлении не определяется
-# (смерть «скорее всего» не попадает ни в одно окно, кроме «нет смерти до τ»), поэтому пациенту показываются
-# вероятности окон, а точечный прогноз — медиана S(t).
-WINDOW_EDGES = [30, 90, 365, TAU]
+# Сроки оценки риска — 1, 3, 6, 9 и 12 месяцев. Прогноз модели — распределение времени, а не дата: медиана S(t)
+# раньше τ означает риск смерти от ССЗ до τ выше 50%, а такой риск — у 1–3% пациентов, поэтому у умерших в первый
+# год ошибка даты около 1300 дней. Пациенту показываются риски смерти от ССЗ к этим срокам, а модели сравниваются по
+# тому, насколько эти риски отделяют умерших к сроку от остальных (AUC) и совпадают с фактом (прогноз / факт,
+# группы риска).
+HORIZONS = [30, 90, 180, 270, 365]
+# Группы риска по прогнозу на 12 месяцев: < 3% — низкий, 3–10% — умеренный, 10–25% — высокий, ≥ 25% — очень высокий
+RISK_GROUP_EDGES = [0.03, 0.10, 0.25]
+# Прогнозы вне выборки для групп риска: кросс-валидация по CV_FOLDS фолдам обучающей когорты. На 302 отложенных
+# пациентах для групп мало событий (7 смертей к 1 месяцу, 16 к году), на 1204 обучающих — 30 и 72
+CV_FOLDS = 5
 MODEL_NAMES = {
     'cph': 'CoxPH',
     'aft': 'Weibull AFT',
@@ -81,6 +87,15 @@ MODEL_NAMES = {
 }
 # Модели ноутбука с калибровкой S(t); 'two' — каскад классификаторов и моделей времени (train_cascade)
 SURVIVAL_MODELS = ['cph', 'aft', 'xgb', 'nn', 'rn']
+# Калибратор с квадратичным членом S(t | s) = S₀(t)^exp(b₁·s + b₂·(s − s̄)²), s̄ — средняя оценка обучающих; у XGBoost
+# выигрыша нет, калибратор линейный (b₂ = 0). Квадратичный член порядок пациентов не меняет, а вероятности уточняет:
+# при кросс-валидации (3 разбиения × 5 фолдов на 1204 обучающих) Brier S(τ) у CoxPH и Weibull AFT 0,0817 → 0,079 во всех
+# трёх разбиениях, ошибка калибровки RMST 17 → 9–11 дней, у нейросетей Brier S(τ) тоже ниже. Чтобы риск оставался
+# монотонным по s, оценка ограничивается вершиной параболы (за ней — 0–0,6% пациентов).
+# Там же проверено и отвергнуто обучение самих моделей на всей когорте (Кокс-модели — с цензурированием, нейросети —
+# с частичными метками, калибратор — по одной или по обеим оценкам): нейросети ранжируют хуже (C-index −0,04…−0,05),
+# у CoxPH, Weibull AFT и XGBoost ранжирование лучше (+0,025…+0,047), но хуже Brier S(τ) и калибровка RMST.
+QUADRATIC_CALIBRATION = ('cph', 'aft', 'nn', 'rn')
 
 # Каскад: классификатор «смерть от ССЗ в первые EARLY_DAYS дней» (XGBoost, вероятность по Платту) и модель Кокса,
 # обученная на проживших дольше EARLY_DAYS. S(t) = p·S_early(t) + (1 − p)·S_late(t), где S_early — распределение дней
@@ -133,14 +148,21 @@ STAGED_CLUSTERS = 8
 STAGED_LINKAGE = 'complete'
 STAGED_GROUPS = ('early', 'late', 'survive')
 
-# Внезапная необъяснимая смерть: смерть от ССЗ в первые SUDDEN_MAX_DAY дней, которую не предсказала ни одна модель
-# (у всех прогноз ≥ τ). Для каждого такого пациента — доля переживших тот же срок (первый месяц, три месяца или год)
-# среди SUDDEN_NEIGHBOURS самых похожих по признакам при поступлении пациентов с известным на этот срок исходом
+# Внезапная необъяснимая смерть: смерть от ССЗ в первые SUDDEN_MAX_DAY дней при невысоком прогнозном риске. Срок
+# сравнения — ближайший из HORIZONS, не раньше дня смерти. Смерть отмечается, если медиана риска восьми моделей к этому
+# сроку ниже SUDDEN_RISK_RATIO средних по когорте (Каплан — Мейер) и не меньше SUDDEN_SURVIVED из SUDDEN_NEIGHBOURS самых
+# похожих по признакам при поступлении пациентов с известным на этот срок исходом его пережили. Медиана моделей, а не
+# «ни одна модель»: прежнее правило «у всех моделей медиана S(t) за τ» не отмечало, например, ID 202 (смерть на 2-й
+# день), потому что XGBoost Cox давал ему медиану 1032 дня — смерть «когда-нибудь до τ», а не в первый месяц.
 SUDDEN_MAX_DAY = 365
+SUDDEN_RISK_RATIO = 2
+SUDDEN_SURVIVED = 0.9
 SUDDEN_NEIGHBOURS = 50
 # Неожиданное выживание: нет смерти от ССЗ до τ, хотя модель по умолчанию для balanced_dataset.csv (многоэтапный
 # конвейер: 1 − вероятность группы «жив дольше τ») оценивала риск смерти от ССЗ до τ не ниже UNEXPECTED_RISK; для
-# сравнения — доля умерших от ССЗ до τ среди SUDDEN_NEIGHBOURS самых похожих пациентов с известным к τ исходом
+# сравнения — медиана риска восьми моделей и доля умерших от ССЗ до τ среди SUDDEN_NEIGHBOURS самых похожих пациентов
+# с известным к τ исходом. Порог 50% — выживание было менее вероятно, чем смерть; у группы «очень высокий» (риск за
+# 12 месяцев ≥ 25%, в среднем 34%) год переживают 60% — для неё выживание ожидаемо
 UNEXPECTED_RISK = 0.5
 # Правдоподобные диапазоны значений: вне них — вероятная ошибка ввода (страница предупреждает о таких значениях)
 PLAUSIBLE = {'age': (18, 105), 'ef_hosp': (10, 80), 'bpm': (30, 220), 'sysAP': (60, 260), 'bmi': (15, 60),
@@ -259,7 +281,10 @@ def train_models(df, features, train_idx):
     time_train = df.loc[train_idx, 'time'].astype(float).values
     event_train = df.loc[train_idx, 'target'].astype(bool).values
 
-    cph_data_train = pd.DataFrame(X_train_sc, columns=features)
+    # Признак без разброса в обучающей выборке lifelines не оценит (onco = 1 — у 5 пациентов df_balanced, во фолде
+    # кросс-валидации их может не остаться): CoxPH и Weibull AFT обучаются без него, его коэффициент — 0
+    active = [f for f, sd in zip(features, X_train_sc.std(axis=0)) if sd > 0]
+    cph_data_train = pd.DataFrame(X_train_sc, columns=features)[active]
     cph_data_train['time'] = time_train
     cph_data_train['target'] = event_train.astype(int)
 
@@ -298,7 +323,7 @@ def train_models(df, features, train_idx):
     W_in /= np.sqrt(np.sum(W_in ** 2, axis=0, keepdims=True) + 1e-8)
     rn_readout = LogisticRegression(solver='liblinear', random_state=42).fit(np.tanh(X_train_sc @ W_in), event_train)
 
-    return dict(scaler=scaler, cph=cph, aft=aft, xgb_surv=xgb_surv, xgb_margin_offset=xgb_margin_offset,
+    return dict(scaler=scaler, active=active, cph=cph, aft=aft, xgb_surv=xgb_surv, xgb_margin_offset=xgb_margin_offset,
                 nn_model=nn_model, W_in=W_in, rn_readout=rn_readout)
 
 
@@ -306,22 +331,46 @@ def risk_scores(m, X_sc, features):
     """Оценка риска каждой модели: лог-риск CoxPH, log λ Weibull AFT, лог-риск XGBoost,
     логиты нейросетей (до сигмоиды)."""
     lam = m['aft'].params_.loc['lambda_']
+    X_active = pd.DataFrame(X_sc, columns=features)[m['active']]
     W1, b1, W2, b2, W3, b3 = m['nn_model'].get_weights()
     hidden = np.maximum(np.maximum(X_sc @ W1 + b1, 0) @ W2 + b2, 0)
     return {
-        'cph': m['cph'].predict_log_partial_hazard(pd.DataFrame(X_sc, columns=features)).values,
-        'aft': X_sc @ lam[features].values + lam['Intercept'],
+        'cph': m['cph'].predict_log_partial_hazard(X_active).values,
+        'aft': X_active.values @ lam[m['active']].values + lam['Intercept'],
         'xgb': m['xgb_surv'].predict(X_sc, output_margin=True) - m['xgb_margin_offset'],
         'nn': (hidden @ W3 + b3).ravel(),
         'rn': m['rn_readout'].decision_function(np.tanh(X_sc @ m['W_in'])),
     }
 
 
+def calibration_covariates(cal, score):
+    """Ковариаты калибратора по оценке риска: s и (s − s̄)² (см. QUADRATIC_CALIBRATION); s ограничена вершиной параболы."""
+    s = np.clip(np.asarray(score, dtype=float), *cal['clip'])
+    return pd.DataFrame({'score': s, 'score2': (s - cal['mean']) ** 2} if cal['quadratic'] else {'score': s})
+
+
+def fit_calibrator(name, score, time, event):
+    """Калибратор S(t | s) модели name: Кокс (для Weibull AFT — Weibull) по оценке риска с учётом цензурирования."""
+    from lifelines import CoxPHFitter, WeibullAFTFitter
+    score = np.asarray(score, dtype=float)
+    cal = {'kind': 'weibull' if name == 'aft' else 'cox', 'quadratic': name in QUADRATIC_CALIBRATION,
+           'mean': float(score.mean()), 'clip': (-np.inf, np.inf)}
+    data = calibration_covariates(cal, score).assign(time=time, event=event)
+    cal['model'] = (WeibullAFTFitter() if name == 'aft' else CoxPHFitter()).fit(data, duration_col='time', event_col='event')
+    if cal['quadratic']:
+        params = cal['model'].params_.loc['lambda_'] if name == 'aft' else cal['model'].params_
+        b1, b2 = params['score'], params['score2']
+        if b2 != 0:
+            # Вершина параболы b₁·s + b₂·(s − s̄)²: дальше от s̄ риск менялся бы с ростом s в обратную сторону
+            vertex = cal['mean'] - b1 / (2 * b2)
+            cal['clip'] = (-np.inf, vertex) if vertex > cal['mean'] else (vertex, np.inf)
+    return cal
+
+
 def recalibrate(full, df, features, bal_train, cal_train, m):
     """Калибраторы S(t | оценка риска), обученные на всей обучающей когорте с учётом цензурирования:
     Кокс для CoxPH, XGBoost и нейросетей, Weibull AFT — для Weibull AFT. Оценки риска пациентов df_balanced —
     вне выборки (модели 5 фолдов), остальных — финальной моделью, которая их не видела."""
-    from lifelines import CoxPHFitter, WeibullAFTFitter
     from sklearn.model_selection import StratifiedKFold
 
     train_all = bal_train.append(cal_train)
@@ -335,16 +384,15 @@ def recalibrate(full, df, features, bal_train, cal_train, m):
     for k, s in risk_scores(m, m['scaler'].transform(full.loc[cal_train, features]), features).items():
         scores[k].loc[cal_train] = s
 
-    data = pd.DataFrame({'time': full.loc[train_all, 'time'].values, 'event': full.loc[train_all, 'target'].values})
-    return {k: (WeibullAFTFitter() if k == 'aft' else CoxPHFitter()).fit(
-                data.assign(score=scores[k].values), duration_col='time', event_col='event')
-            for k in SURVIVAL_MODELS}
+    time, event = full.loc[train_all, 'time'].values, full.loc[train_all, 'target'].values
+    return {k: fit_calibrator(k, scores[k].values, time, event) for k in SURVIVAL_MODELS}
 
 
 def library_survival(m, calibrators, X_sc, features):
     """Функции выживаемости S(t) на сетке средствами самих библиотек (lifelines, xgboost, keras), форма (n, τ)."""
     scores = risk_scores(m, X_sc, features)
-    return {k: calibrators[k].predict_survival_function(pd.DataFrame({'score': scores[k]}), times=GRID).values.T
+    return {k: calibrators[k]['model'].predict_survival_function(calibration_covariates(calibrators[k], scores[k]),
+                                                                 times=GRID).values.T
             for k in SURVIVAL_MODELS}
 
 
@@ -559,6 +607,19 @@ def _export_cox(cox, covariates):
     return {'beta': _round(cox.params_[covariates].values, 10), 'center': _round(center, 10), 'H0': _round(H0)}
 
 
+def _export_calibrator(cal):
+    """Калибратор оценки риска s: s̄, границы s (null — нет границы) и модель Кокса или Weibull по ковариатам
+    s, (s − s̄)² (у линейного — только s)."""
+    covariates = list(calibration_covariates(cal, [0.0]).columns)
+    out = {'mean': float(cal['mean']), 'clip': [float(v) if np.isfinite(v) else None for v in cal['clip']]}
+    model = cal['model']
+    if cal['kind'] == 'weibull':
+        lam = model.params_.loc['lambda_']
+        return {'type': 'weibull', **out, 'intercept': float(lam['Intercept']), 'beta': _round(lam[covariates].values, 10),
+                'rho_intercept': float(model.params_.loc[('rho_', 'Intercept')])}
+    return {'type': 'cox', **out, **_export_cox(model, covariates)}
+
+
 def _export_xgb_trees(xgb_surv, X_train_sc):
     booster = xgb_surv.get_booster()
     trees = json.loads(booster.save_raw('json'))['learner']['gradient_booster']['model']['trees']
@@ -589,35 +650,32 @@ def export_params(df, features, train_idx, m, calibrators, ts, bm, st):
     trees, base_margin = _export_xgb_trees(m['xgb_surv'], X_train_sc)
     nn_weights = m['nn_model'].get_weights()  # W1, b1, W2, b2, W3, b3
 
-    # CoxPH с калибратором — снова модель Кокса по признакам: log HR = c · (x − center) · β,
-    # базовый риск — калибратора при оценке риска 0
-    cal = calibrators['cph']
-    c = cal.params_['score']
-    cph = {'beta': _round(c * m['cph'].params_[features].values, 10),
-           'center': _round(m['cph']._norm_mean[features].values, 10),
-           'H0': _round(cal.predict_cumulative_hazard(pd.DataFrame({'score': [0.0]}), times=GRID).values[:, 0])}
-
-    # Weibull AFT с калибратором — снова Weibull AFT: log λ = a + b · (x · β + β0), ρ — у калибратора
-    lam, cal = m['aft'].params_.loc['lambda_'], calibrators['aft']
-    a, b = cal.params_.loc[('lambda_', 'Intercept')], cal.params_.loc[('lambda_', 'score')]
-    aft = {'lambda_intercept': float(a + b * lam['Intercept']), 'lambda_beta': _round(b * lam[features].values, 10),
-           'rho_intercept': float(cal.params_.loc[('rho_', 'Intercept')])}
+    # Оценки риска CoxPH — (x − center) · β, Weibull AFT — log λ = x · β + β0; у признаков без разброса
+    # в обучающей выборке β = 0. S(t) — по калибратору оценки
+    position = [features.index(f) for f in m['active']]
+    cph_beta, cph_center, aft_beta = np.zeros(len(features)), np.zeros(len(features)), np.zeros(len(features))
+    cph_beta[position] = m['cph'].params_[m['active']].values
+    cph_center[position] = m['cph']._norm_mean[m['active']].values
+    lam = m['aft'].params_.loc['lambda_']
+    aft_beta[position] = lam[m['active']].values
 
     return {
         'scaler': {'mean': _round(m['scaler'].mean_, 12), 'scale': _round(m['scaler'].scale_, 12)},
         'models': {
-            'cph': {'type': 'cox', **cph},
-            'aft': {'type': 'weibull_aft', **aft},
+            'cph': {'type': 'cox', 'beta': _round(cph_beta, 10), 'center': _round(cph_center, 10),
+                    'calibrator': _export_calibrator(calibrators['cph'])},
+            'aft': {'type': 'weibull_aft', 'lambda_intercept': float(lam['Intercept']), 'lambda_beta': _round(aft_beta, 10),
+                    'calibrator': _export_calibrator(calibrators['aft'])},
             'xgb': {'type': 'xgb_cox', 'trees': trees, 'bias': float(base_margin - m['xgb_margin_offset']),
-                    'calibrator': _export_cox(calibrators['xgb'], ['score'])},
+                    'calibrator': _export_calibrator(calibrators['xgb'])},
             'nn': {'type': 'mlp',
                    'layers': [{'in': w.shape[0], 'out': w.shape[1], 'W': _f32_b64(w), 'b': _f32_b64(b), 'activation': act}
                               for (w, b), act in zip(zip(nn_weights[::2], nn_weights[1::2]), ['relu', 'relu', 'linear'])],
-                   'calibrator': _export_cox(calibrators['nn'], ['score'])},
+                   'calibrator': _export_calibrator(calibrators['nn'])},
             'rn': {'type': 'reservoir', 'n_features': len(features), 'n_reservoir': m['W_in'].shape[1],
                    'W_in': _f32_b64(m['W_in']), 'coef': _f32_b64(m['rn_readout'].coef_[0]),
                    'intercept': float(m['rn_readout'].intercept_[0]),
-                   'calibrator': _export_cox(calibrators['rn'], ['score'])},
+                   'calibrator': _export_calibrator(calibrators['rn'])},
             'two': _export_cascade(ts, features),
             'bal': {'type': 'balanced_mixture', 'coef': _round(bm['classifier'].coef_[0], 10),
                     'intercept': float(bm['classifier'].intercept_[0]), 'death_days': bm['death_days'].tolist(),
@@ -688,8 +746,25 @@ class SurvivalTimePredictor:
         lph = (np.atleast_2d(Z) - np.array(cox['center'])) @ np.array(cox['beta'])
         return np.exp(-np.outer(np.exp(lph), np.array(cox['H0'])))
 
+    @staticmethod
+    def _calibrated(cal, score):
+        """S(t) по калибратору оценки риска — как calibrated() в docs/survival_predictor.js."""
+        lo, hi = (-np.inf if cal['clip'][0] is None else cal['clip'][0]), (np.inf if cal['clip'][1] is None else cal['clip'][1])
+        s = np.clip(np.ravel(score), lo, hi)
+        Z = np.column_stack([s, (s - cal['mean']) ** 2])[:, :len(cal['beta'])]
+        if cal['type'] == 'weibull':
+            lam = np.exp(Z @ np.array(cal['beta']) + cal['intercept'])
+            return np.exp(-(GRID[None, :] / lam[:, None]) ** np.exp(cal['rho_intercept']))
+        return SurvivalTimePredictor._cox(cal, Z)
+
     def risk_score(self, X_sc, name):
-        """Ковариата калибратора Кокса: лог-риск XGBoost или логит нейросети."""
+        """Ковариата калибратора: лог-риск CoxPH и XGBoost, log λ Weibull AFT, логит нейросети."""
+        if name == 'cph':
+            m = self.models['cph']
+            return (X_sc - np.array(m['center'])) @ np.array(m['beta'])
+        if name == 'aft':
+            m = self.models['aft']
+            return X_sc @ np.array(m['lambda_beta']) + m['lambda_intercept']
         if name == 'xgb':
             m = self.models['xgb']
             return (_xgb_leaf_sum(m['trees'], X_sc) + m['bias'])[:, None]
@@ -745,36 +820,32 @@ class SurvivalTimePredictor:
             return self._two_stage(X_sc)
         if name == 'bal':
             return self._balanced(X_sc)
-        if name == 'cph':
-            return self._cox(m, X_sc)
-        if name == 'aft':
-            lam = np.exp(X_sc @ np.array(m['lambda_beta']) + m['lambda_intercept'])
-            return np.exp(-(GRID[None, :] / lam[:, None]) ** np.exp(m['rho_intercept']))
-        return self._cox(m['calibrator'], self.risk_score(X_sc, name))
+        return self._calibrated(m['calibrator'], self.risk_score(X_sc, name))
 
     def predict(self, X_raw, name):
         return point_prediction(self.survival(X_raw, name))
 
 
-def window_probabilities(S):
-    """Вероятности окон WINDOW_EDGES по S(t): смерть от ССЗ в первые 30 дней, на 31–90-й, 91–365-й, 366–1499-й день
-    и отсутствие смерти от ССЗ до τ, форма (n, 5)."""
-    S = np.atleast_2d(S)
-    s = lambda day: S[:, min(day, S.shape[1] - 1)]
-    return np.column_stack([1 - s(30), s(30) - s(90), s(90) - s(365), s(365) - s(TAU - 1), s(TAU - 1)])
+def horizon_risks(S):
+    """Риски смерти от ССЗ к срокам HORIZONS по S(t), форма (n, len(HORIZONS))."""
+    return 1 - np.atleast_2d(S)[:, HORIZONS]
+
+
+def risk_group(risk_1y):
+    """Группа риска 0–3 (низкий, умеренный, высокий, очень высокий) по прогнозу на 12 месяцев (RISK_GROUP_EDGES)."""
+    return np.digitize(risk_1y, RISK_GROUP_EDGES)
 
 
 def point_prediction(S):
     """Прогноз по функциям выживаемости S (n, τ).
 
     time — медиана: первый день, когда S(t) ≤ 0,5, или τ, если S(t) > 0,5 на всём горизонте («смерти от ССЗ
-    в пределах τ не ожидается»). Медиана минимизирует среднюю абсолютную ошибку. windows — профиль риска по окнам
-    времени; rmst — RMST(τ) = Σ S(t), ожидаемое число дней без смерти от ССЗ (как в ноутбуке)."""
+    в пределах τ не ожидается»). Медиана минимизирует среднюю абсолютную ошибку. risks — риски смерти от ССЗ к срокам
+    HORIZONS; rmst — RMST(τ) = Σ S(t), ожидаемое число дней без смерти от ССЗ (как в ноутбуке)."""
     S = np.atleast_2d(S)
     below = S <= 0.5
     time = np.where(below.any(axis=1), below.argmax(axis=1), S.shape[1])
-    return {'time': time, 'rmst': S.sum(axis=1), 's_tau': S[:, -1], 'risk_1y': 1 - S[:, 365],
-            'windows': window_probabilities(S)}
+    return {'time': time, 'rmst': S.sum(axis=1), 's_tau': S[:, -1], 'risks': horizon_risks(S)}
 
 
 # ---------------------------------------------------------------------------
@@ -783,10 +854,14 @@ def point_prediction(S):
 def test_metrics(curves, time_obs, event_obs, time_train, event_train):
     """Стандартные метрики моделей выживаемости на отложенной выборке.
 
-    C-index — согласованность порядка пациентов по RMST(τ) с порядком событий. AUC 30 и 365 дней — различение
-    умерших от ССЗ к этому дню и проживших дольше по риску 1 − S(t). Brier S(τ) и интегральный Brier score (IBS,
-    среднее Brier score по дням 30, 60, …, 1470) — точность самих вероятностей: 0 — идеально, 0,25 — константа 0,5.
-    MAE — средняя абсолютная ошибка медианы S(t) относительно min(T, τ) у пациентов, у которых он известен.
+    C-index — согласованность порядка пациентов по RMST(τ) с порядком событий. По каждому сроку HORIZONS: auc —
+    различение умерших от ССЗ к сроку и проживших дольше по риску 1 − S(t); eo — отношение среднего прогноза риска
+    к риску по Каплану — Мейеру (1 — число смертей предсказано точно); ipa — 1 − Brier / Brier прогноза без признаков
+    (всем риск по Каплану — Мейеру обучающей выборки): доля, на которую модель точнее среднего. Brier S(τ)
+    и интегральный Brier score (IBS, среднее Brier score по дням 30, 60, …, 1470) — точность самих вероятностей:
+    0 — идеально, 0,25 — константа 0,5.
+    MAE — средняя абсолютная ошибка медианы S(t) относительно min(T, τ) у пациентов, у которых он известен (большая
+    по устройству прогноза, см. HORIZONS; на странице не показывается).
     Ошибка калибровки RMST — среднее |прогноз − RMST Каплана — Мейера| по квинтилям прогноза.
     Веса IPCW (обратная вероятность не быть цензурированным) нужны, чтобы пациенты, цензурированные раньше,
     корректно входили в оценку всей когорты."""
@@ -808,6 +883,8 @@ def test_metrics(curves, time_obs, event_obs, time_train, event_train):
     known = w_tau > 0
     true_tau = np.minimum(time_obs, TAU)
     ibs_days = np.arange(30, TAU, 30)
+    km_obs = KaplanMeierFitter().fit(time_obs, event_obs)
+    km_null = KaplanMeierFitter().fit(time_train, event_train)  # прогноз без признаков: всем средний риск
     out = {}
     for name, S in curves.items():
         p = point_prediction(S)
@@ -820,21 +897,97 @@ def test_metrics(curves, time_obs, event_obs, time_train, event_train):
             w = weights_at(day)
             brier.append(np.sum(w * ((time_obs > day) - S[:, day]) ** 2) / len(time_obs))
 
-        def auc(day):
+        def at_horizon(day):
             w = weights_at(day)
             k = w > 0
-            return float(roc_auc_score(event_obs[k] & (time_obs[k] <= day), 1 - S[k, day], sample_weight=w[k]))
+            died = event_obs & (time_obs <= day)
+            risk = 1 - S[:, day]
+            null = 1 - km_null.survival_function_at_times(day).iloc[0]
+            observed = 1 - km_obs.survival_function_at_times(day).iloc[0]
+            return (float(roc_auc_score(died[k], risk[k], sample_weight=w[k])), float(risk.mean() / observed),
+                    float(1 - np.sum(w * (died - risk) ** 2) / np.sum(w * (died - null) ** 2)))
+        auc, eo, ipa = zip(*map(at_horizon, HORIZONS))
         out[name] = {
             'c_index': float(concordance_index(time_obs, rmst, event_obs)),
-            'auc_30': auc(30), 'auc_365': auc(365),
+            'auc': list(auc), 'eo': list(eo), 'ipa': list(ipa),
             'brier_s_tau': float(np.sum(w_tau * ((time_obs >= TAU) - S[:, -1]) ** 2) / len(time_obs)),
             'ibs': float(np.mean(brier)),
             'mae': float(np.sum((w_tau * np.abs(p['time'] - true_tau))[known]) / w_tau[known].sum()),
             'calibration_rmst': float(calibration),
             'mean_s_tau': float(S[:, -1].mean()),
         }
-    out['_km_s_tau'] = float(KaplanMeierFitter().fit(time_obs, event_obs).survival_function_at_times(TAU - 1).iloc[0])
+    out['_km_s_tau'] = float(km_obs.survival_function_at_times(TAU - 1).iloc[0])
+    out['_deaths'] = [int((event_obs & (time_obs <= day)).sum()) for day in HORIZONS]
     return out
+
+
+def risk_group_calibration(S, time, event):
+    """Прогноз и факт по группам риска (risk_group по прогнозу на 12 месяцев): число пациентов, смертей от ССЗ
+    за 12 месяцев, средний прогноз риска и риск по Каплану — Мейеру к каждому сроку HORIZONS."""
+    from lifelines import KaplanMeierFitter
+    risks = horizon_risks(S)
+    group = risk_group(risks[:, -1])
+    out = []
+    for g in range(len(RISK_GROUP_EDGES) + 1):
+        k = group == g
+        if not k.any():
+            out.append({'n': 0, 'deaths': 0, 'pred': None, 'obs': None})
+            continue
+        km = KaplanMeierFitter().fit(time[k], event[k])
+        out.append({'n': int(k.sum()), 'deaths': int((event[k] & (time[k] <= HORIZONS[-1])).sum()),
+                    'pred': _round(risks[k].mean(axis=0), 4),
+                    'obs': _round(1 - km.survival_function_at_times(HORIZONS).values, 4)})
+    return out
+
+
+def train_all_models(full, df, features, bal_train, cal_train, log=lambda *a: None):
+    """Все восемь моделей: модели ноутбука на bal_train (df_balanced) с калибровкой S(t) на всей обучающей когорте,
+    каскад, Balanced mixture и конвейер с частичными метками цензурированных до τ (cal_train)."""
+    train_all = bal_train.append(cal_train)
+    log(f'Обучаем модели ноутбука на df_balanced ({len(bal_train)} пациентов, {len(features)} признаков при поступлении; '
+        f'без {", ".join(POST_DISCHARGE)})...')
+    m = train_models(df, features, bal_train)
+    log(f'Калибруем S(t) на всей обучающей когорте ({len(train_all)} пациентов)...')
+    calibrators = recalibrate(full, df, features, bal_train, cal_train, m)
+    log(f'Каскад: классификатор смерти от ССЗ ≤ {EARLY_DAYS} дн. и модель Кокса для остальных...')
+    ts = train_cascade(full, features, train_all, m['scaler'])
+    weights = ipcw_weights(full, train_all, bal_train)
+    q = survival_share(full, features, m['scaler'], bal_train, cal_train, weights)
+    log(f'Частичные метки {len(cal_train)} цензурированных до τ: q (доля доживших до τ среди {PSEUDO_NEIGHBOURS} похожих) '
+        f'в среднем {q.mean():.3f}, 5-й процентиль {q.quantile(0.05):.2f}, минимум {q.min():.2f}')
+    bm = train_balanced(full, features, bal_train, m['scaler'], q, weights)
+    log(f'Многоэтапный конвейер: новый balanced без смертей от ССЗ в первые {STAGED_EARLY_DAYS} дн. — '
+        f'{len(staged_training_set(full, bal_train))} обучающих пациентов из {len(bal_train)} и частичные метки...')
+    st = train_staged(full, features, bal_train, train_all, m['scaler'], q)
+    return dict(m=m, calibrators=calibrators, ts=ts, bm=bm, st=st)
+
+
+def library_curves(fitted, X_raw, features):
+    """S(t) всех восьми моделей средствами библиотек для пациентов X_raw (DataFrame признаков моделей), а также
+    вероятности групп и F_поздн конвейера."""
+    m = fitted['m']
+    X_sc = m['scaler'].transform(X_raw)
+    curves = library_survival(m, fitted['calibrators'], X_sc, features)
+    curves['two'] = library_cascade(fitted['ts'], X_sc, features)
+    curves['bal'], _ = library_balanced(fitted['bm'], X_sc)
+    curves['stg'], staged_P, staged_F_late = library_staged(fitted['st'], X_raw.values.astype(float), X_sc, features)
+    return curves, staged_P, staged_F_late
+
+
+def cross_validated_curves(full, df, features, train_idx):
+    """Прогнозы вне выборки для обучающих пациентов (см. CV_FOLDS): S(t) каждой модели, обученной без фолда пациента
+    так же, как при экспорте."""
+    from sklearn.model_selection import StratifiedKFold
+    oof = {k: np.zeros((len(train_idx), TAU)) for k in MODEL_NAMES}
+    folds = StratifiedKFold(CV_FOLDS, shuffle=True, random_state=0).split(train_idx, full.loc[train_idx, 'target'])
+    for i, (fold_train, fold_val) in enumerate(folds):
+        print(f'  фолд {i + 1} из {CV_FOLDS}...')
+        fold = train_idx[fold_train]
+        fitted = train_all_models(full, df, features, fold.intersection(df.index), fold.difference(df.index))
+        curves = library_curves(fitted, full.loc[train_idx[fold_val], features], features)[0]
+        for k in oof:
+            oof[k][fold_val] = curves[k]
+    return oof
 
 
 def cmd_export(args):
@@ -843,39 +996,22 @@ def cmd_export(args):
     mf = model_features(features)
     df = balanced_subset(full)
     bal_train, cal_train, test_idx = split_cohort(full, df)
-    print(f'Обучаем модели ноутбука на df_balanced ({len(bal_train)} пациентов, {len(mf)} признаков при поступлении; '
-          f'без {", ".join(POST_DISCHARGE)})...')
-    m = train_models(df, mf, bal_train)
-    print(f'Калибруем S(t) на всей обучающей когорте ({len(bal_train) + len(cal_train)} пациентов)...')
-    calibrators = recalibrate(full, df, mf, bal_train, cal_train, m)
-
     train_all = bal_train.append(cal_train)
-    print(f'Каскад: классификатор смерти от ССЗ ≤ {EARLY_DAYS} дн. и модель Кокса для остальных...')
-    ts = train_cascade(full, mf, train_all, m['scaler'])
-    weights = ipcw_weights(full, train_all, bal_train)
-    q = survival_share(full, mf, m['scaler'], bal_train, cal_train, weights)
-    print(f'Частичные метки {len(cal_train)} цензурированных до τ: q (доля доживших до τ среди {PSEUDO_NEIGHBOURS} похожих) '
-          f'в среднем {q.mean():.3f}, 5-й процентиль {q.quantile(0.05):.2f}, минимум {q.min():.2f}')
-    print('Balanced mixture...')
-    bm = train_balanced(full, mf, bal_train, m['scaler'], q, weights)
-    staged_idx = staged_training_set(full, bal_train)
-    print(f'Многоэтапный конвейер: новый balanced без смертей от ССЗ в первые {STAGED_EARLY_DAYS} дн. — '
-          f'{len(staged_idx)} обучающих пациентов из {len(bal_train)} и частичные метки...')
-    st = train_staged(full, mf, bal_train, train_all, m['scaler'], q)
+    fitted = train_all_models(full, df, mf, bal_train, cal_train, log=print)
+    m, calibrators, ts, bm, st = (fitted[k] for k in ('m', 'calibrators', 'ts', 'bm', 'st'))
 
     # Эталонный прогноз библиотек — для всех пациентов полного датасета
-    X_all_sc = m['scaler'].transform(full[mf])
-    reference = library_survival(m, calibrators, X_all_sc, mf)
-    reference['two'] = library_cascade(ts, X_all_sc, mf)
-    reference['bal'], _ = library_balanced(bm, X_all_sc)
-    reference['stg'], staged_P, staged_F_late = library_staged(st, full[mf].values.astype(float), X_all_sc, mf)
+    reference, staged_P, staged_F_late = library_curves(fitted, full[mf], mf)
     staged_cluster = cluster_of(st['clustering'], full[mf].values.astype(float))
     staged_group, staged_time = staged_route(staged_P, st['early_days'], staged_F_late)
     reference_pred = {k: point_prediction(S) for k, S in reference.items()}
-    sudden, sudden_horizon, sudden_survived = sudden_unexplained_deaths(full, mf, [p['time'] for p in reference_pred.values()])
+    cohort_km = KaplanMeierFitter().fit(full['time'], full['target'])
+    sudden = sudden_unexplained_deaths(full, mf, reference, cohort_km)
     p_death_staged = 1 - staged_P[:, 2]
+    consensus_tau = np.median([1 - S[:, -1] for S in reference.values()], axis=0)
     unexpected, unexpected_died = unexpected_survivals(full, mf, p_death_staged)
-    print(f'Внезапных необъяснимых смертей от ССЗ (≤ {SUDDEN_MAX_DAY} дн., ни одна модель не предсказала): {int(sudden.sum())}; '
+    print(f'Внезапных необъяснимых смертей от ССЗ (≤ {SUDDEN_MAX_DAY} дн., медиана риска моделей к сроку < '
+          f'{SUDDEN_RISK_RATIO} средних, ≥ {SUDDEN_SURVIVED:.0%} похожих пережили срок): {int(sudden["sudden"].sum())}; '
           f'неожиданных выживаний (риск по конвейеру ≥ {UNEXPECTED_RISK:.0%}): {int(unexpected.sum())}')
 
     # Метрики — на отложенных пациентах всей когорты (302, веса IPCW) для обоих датасетов: все модели откалиброваны
@@ -886,7 +1022,17 @@ def cmd_export(args):
                            full.loc[test_idx, 'time'].values.astype(float), full.loc[test_idx, 'target'].values.astype(bool),
                            full.loc[train_all, 'time'].values.astype(float), full.loc[train_all, 'target'].values)
     km_s_tau = metrics.pop('_km_s_tau')
-    cohort_km = KaplanMeierFitter().fit(full['time'], full['target'])
+    test_deaths = metrics.pop('_deaths')
+
+    # Группы риска — по прогнозам вне выборки на всей обучающей когорте (см. CV_FOLDS)
+    print(f'Прогнозы вне выборки для групп риска: кросс-валидация по {CV_FOLDS} фолдам {len(train_all)} обучающих...')
+    oof = cross_validated_curves(full, df, mf, train_all)
+    t_all = full.loc[train_all, 'time'].values.astype(float)
+    e_all = full.loc[train_all, 'target'].values.astype(bool)
+    metrics_cv = test_metrics(oof, t_all, e_all, t_all, e_all)
+    metrics_cv.pop('_km_s_tau')
+    cv_deaths = metrics_cv.pop('_deaths')
+    calibration = {k: risk_group_calibration(S, t_all, e_all) for k, S in oof.items()}
 
     # Пациенты — весь med_dataset_cardio.xlsx; balanced_dataset.csv — подмножество его строк
     split = np.full(len(full), SPLIT_TEST)
@@ -894,15 +1040,15 @@ def cmd_export(args):
     split[full.index.isin(cal_train)] = SPLIT_CALIBRATION
     bundle = {
         'meta': {'tau': TAU, 'generated': date.today().isoformat(), 'notebook': 'Survival-function-analysys.ipynb',
-                 'model_names': MODEL_NAMES, 'window_edges': WINDOW_EDGES, 'early_days': EARLY_DAYS,
-                 'plausible': PLAUSIBLE, 'unexpected_risk': UNEXPECTED_RISK,
-                 # Каплан — Мейер по всей когорте: средний риск — для сравнения с прогнозом пациента
-                 'cohort_risk_1y': float(1 - cohort_km.survival_function_at_times(365).iloc[0]),
+                 'model_names': MODEL_NAMES, 'horizons': HORIZONS, 'risk_group_edges': RISK_GROUP_EDGES,
+                 'early_days': EARLY_DAYS, 'plausible': PLAUSIBLE, 'unexpected_risk': UNEXPECTED_RISK,
+                 # Каплан — Мейер по всей когорте: средний риск к срокам — для сравнения с прогнозом пациента
+                 'cohort_risks': _round(1 - cohort_km.survival_function_at_times(HORIZONS).values, 4),
                  'cohort_s_tau': float(cohort_km.survival_function_at_times(TAU - 1).iloc[0]),
-                 # профиль риска пациента «в среднем по когорте» (Каплан — Мейер) — для сравнения с профилем пациента
-                 'cohort_windows': _round(window_probabilities(cohort_km.survival_function_at_times(GRID).values[None, :])[0], 4),
-                 'test_size': len(test_idx), 'test_km_s_tau': km_s_tau,
-                 'sudden_max_day': SUDDEN_MAX_DAY, 'sudden_neighbours': SUDDEN_NEIGHBOURS},
+                 'test_size': len(test_idx), 'test_km_s_tau': km_s_tau, 'test_deaths': test_deaths,
+                 'cv_size': len(train_all), 'cv_folds': CV_FOLDS, 'cv_deaths': cv_deaths,
+                 'sudden_max_day': SUDDEN_MAX_DAY, 'sudden_risk_ratio': SUDDEN_RISK_RATIO,
+                 'sudden_survived': SUDDEN_SURVIVED, 'sudden_neighbours': SUDDEN_NEIGHBOURS},
         'features': features,
         'model_features': mf,  # признаки моделей — без известных только после выписки
         'columns': full.columns.tolist(),  # порядок столбцов датасетов — для выгрузки изменённого датасета
@@ -913,13 +1059,19 @@ def cmd_export(args):
             'death_any': death_any.astype(int).tolist(),
             'split': split.tolist(),  # 0 — обучающий, цензурирован до τ; 1 — обучающий из df_balanced; 2 — отложенная выборка
             'X': [_round(row, 10) for row in full[features].values],
-            # Внезапная необъяснимая смерть: признак, срок сравнения, доля переживших его среди похожих пациентов
-            'sudden': sudden.astype(int).tolist(),
-            'sudden_horizon': sudden_horizon.tolist(),
-            'sudden_survived': _round(sudden_survived, 3),
-            # Неожиданное выживание: признак, риск смерти от ССЗ до τ по конвейеру, доля умерших среди похожих
+            # Внезапная необъяснимая смерть: признак, срок сравнения, доля переживших его среди похожих пациентов,
+            # медиана риска восьми моделей к сроку и наибольший риск (модель — индекс в meta.model_names)
+            'sudden': sudden['sudden'].astype(int).tolist(),
+            'sudden_horizon': sudden['horizon'].tolist(),
+            'sudden_survived': _round(sudden['survived'], 3),
+            'sudden_risk': _round(sudden['risk'], 4),
+            'sudden_top_risk': _round(sudden['top_risk'], 4),
+            'sudden_top_model': sudden['top_model'].tolist(),
+            # Неожиданное выживание: признак, риск смерти от ССЗ до τ по конвейеру и медиана восьми моделей,
+            # доля умерших среди похожих
             'unexpected': unexpected.astype(int).tolist(),
             'unexpected_risk': _round(np.where(unexpected, p_death_staged, 0), 3),
+            'unexpected_consensus': _round(np.where(unexpected, consensus_tau, 0), 3),
             'unexpected_died': _round(unexpected_died, 3),
         },
         'datasets': {
@@ -927,7 +1079,9 @@ def cmd_export(args):
             'full': {'file': FULL_XLSX.name, 'rows': None},
         },
         **export_params(df, mf, bal_train, m, calibrators, ts, bm, st),
-        'metrics': metrics,
+        'metrics': metrics,          # 302 отложенных пациента всей когорты
+        'metrics_cv': metrics_cv,    # прогнозы вне выборки на обучающей когорте
+        'calibration': calibration,  # прогноз и факт по группам риска, прогнозы вне выборки
         # Прогноз по самим библиотекам — эталон для проверки JavaScript-расчёта (scripts/check_js_predictor.js)
         'reference_rmst': {k: _round(S.sum(axis=1), 9) for k, S in reference.items()},
         'reference_time': {k: p['time'].tolist() for k, p in reference_pred.items()},
@@ -938,16 +1092,26 @@ def cmd_export(args):
 
     # Проверка: расчёт по экспортированным параметрам совпадает с библиотеками
     predictor = SurvivalTimePredictor(json.loads(json.dumps(bundle)))
-    print(f'\nОтложенная выборка — вся когорта: {len(test_idx)} отложенных, веса IPCW, S(τ) по Каплану — Мейеру {km_s_tau:.3f}')
-    print(f'{"модель":<19} {"C-index":>8} {"AUC 30":>7} {"AUC 365":>8} {"Brier τ":>8} {"IBS":>6} {"MAE":>7} '
-          f'{"калибр.":>8} {"ср. S(τ)":>9} {"max |ΔRMST|":>12}')
+    for title, ms, deaths in [(f'Отложенная выборка — вся когорта: {len(test_idx)} отложенных, веса IPCW, '
+                               f'S(τ) по Каплану — Мейеру {km_s_tau:.3f}', metrics, test_deaths),
+                              (f'Прогнозы вне выборки — {len(train_all)} обучающих, {CV_FOLDS} фолдов', metrics_cv, cv_deaths)]:
+        print(f'\n{title}; смертей от ССЗ к срокам {", ".join(f"{h} дн. — {d}" for h, d in zip(HORIZONS, deaths))}')
+        print(f'{"модель":<19} {"C-index":>8} ' + ' '.join(f'{f"AUC {h}":>8}' for h in HORIZONS)
+              + f' {"E/O 365":>8} {"IBS":>6} {"калибр.":>8} {"ср. S(τ)":>9}')
+        for name in MODEL_NAMES:
+            r = ms[name]
+            print(f'{MODEL_NAMES[name]:<19} {r["c_index"]:>8.4f} ' + ' '.join(f'{a:>8.3f}' for a in r['auc'])
+                  + f' {r["eo"][-1]:>8.2f} {r["ibs"]:>6.3f} {r["calibration_rmst"]:>5.0f} дн {r["mean_s_tau"]:>9.3f}')
+    labels = ['< 3%', '3–10%', '10–25%', '≥ 25%']
+    print(f'\nГруппы риска (по прогнозу на 12 мес., вне выборки), прогноз / факт к срокам {", ".join(map(str, HORIZONS))} дн.:')
+    for name in ('cph', 'stg'):
+        print(f'  {MODEL_NAMES[name]}')
+        for label, g in zip(labels, calibration[name]):
+            cells = '  '.join(f'{p:.1%}/{o:.1%}' for p, o in zip(g['pred'], g['obs'])) if g['n'] else '—'
+            print(f'    {label:>7}: {g["n"]:>4} пациентов, смертей за год {g["deaths"]:>3}:  {cells}')
     for name in MODEL_NAMES:
         diff = np.abs(predictor.predict(full[features].values, name)['rmst'] - reference[name].sum(axis=1)).max()
-        r = metrics[name]
-        print(f'{MODEL_NAMES[name]:<19} {r["c_index"]:>8.4f} {r["auc_30"]:>7.3f} {r["auc_365"]:>8.3f} '
-              f'{r["brier_s_tau"]:>8.3f} {r["ibs"]:>6.3f} {r["mae"]:>4.0f} дн {r["calibration_rmst"]:>5.0f} дн '
-              f'{r["mean_s_tau"]:>9.3f} {diff:>12.2e}')
-        assert diff < 0.05, f'{name}: расчёт по параметрам расходится с библиотекой'
+        assert diff < 0.05, f'{name}: расчёт по параметрам расходится с библиотекой (max |ΔRMST| = {diff:.2e})'
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -955,24 +1119,32 @@ def cmd_export(args):
     print(f'Записано: {out.relative_to(ROOT) if out.is_relative_to(ROOT) else out} ({os.path.getsize(out) / 1024:.0f} КБ)')
 
 
-def sudden_unexplained_deaths(full, model_feature_names, predicted_times):
-    """Внезапные необъяснимые смерти (см. SUDDEN_MAX_DAY). Возвращает массивы по пациентам: признак группы,
-    срок сравнения (30, 90 или 365 дней) и долю переживших его среди самых похожих пациентов."""
+def sudden_unexplained_deaths(full, model_feature_names, curves, cohort_km):
+    """Внезапные необъяснимые смерти (см. SUDDEN_RISK_RATIO). curves — S(t) всех моделей для всех пациентов.
+    Возвращает массивы по пациентам: признак группы, срок сравнения (из HORIZONS), долю переживших его среди самых
+    похожих пациентов, медиану риска моделей к сроку, наибольший риск и номер модели с ним."""
     time = full['time'].values
     event = full['target'].values.astype(bool)
-    missed = np.all([t >= TAU for t in predicted_times], axis=0)
-    sudden = event & (time <= SUDDEN_MAX_DAY) & missed
     X = full[model_feature_names].values
     Z = (X - X.mean(axis=0)) / X.std(axis=0)
-    horizon = np.zeros(len(time), dtype=int)
-    survived = np.zeros(len(time))
-    for g in np.flatnonzero(sudden):
-        h = 30 if time[g] <= 30 else 90 if time[g] <= 90 else 365
-        known = np.flatnonzero(((event & (time <= h)) | (time > h)) & (np.arange(len(time)) != g))
+    risks = np.stack([1 - S[:, HORIZONS] for S in curves.values()])  # модели × пациенты × сроки
+    cohort = 1 - cohort_km.survival_function_at_times(HORIZONS).values
+    n = len(time)
+    out = {'sudden': np.zeros(n, bool), 'horizon': np.zeros(n, int), 'survived': np.zeros(n), 'risk': np.zeros(n),
+           'top_risk': np.zeros(n), 'top_model': np.zeros(n, int)}
+    for g in np.flatnonzero(event & (time <= SUDDEN_MAX_DAY)):
+        j = next(j for j, h in enumerate(HORIZONS) if time[g] <= h)
+        h = HORIZONS[j]
+        known = np.flatnonzero(((event & (time <= h)) | (time > h)) & (np.arange(n) != g))
         nearest = known[np.argsort(((Z[known] - Z[g]) ** 2).sum(axis=1))[:SUDDEN_NEIGHBOURS]]
-        horizon[g] = h
-        survived[g] = 1 - (event[nearest] & (time[nearest] <= h)).mean()
-    return sudden, horizon, survived
+        survived = 1 - (event[nearest] & (time[nearest] <= h)).mean()
+        risk = np.median(risks[:, g, j])
+        if risk < SUDDEN_RISK_RATIO * cohort[j] and survived >= SUDDEN_SURVIVED:
+            top = int(risks[:, g, j].argmax())
+            out['sudden'][g] = True
+            out['horizon'][g], out['survived'][g], out['risk'][g] = h, survived, risk
+            out['top_risk'][g], out['top_model'][g] = risks[top, g, j], top
+    return out
 
 
 def unexpected_survivals(full, model_feature_names, p_death):
@@ -1026,15 +1198,19 @@ def cmd_predict(args):
         unused = '' if predictor.features[i] in predictor.model_features else ' (моделями не используется: известен после выписки)'
         print(f'  {predictor.features[i]}: {x[i]:g} → {x_edit[i]:g}{unused}')
     names = MODEL_NAMES if args.model == 'all' else {args.model: MODEL_NAMES[args.model]}
-    print(f'{"модель":<19} {"прогноз":>9} {"с изм.":>8} {"≤30 дн":>7} {"31–90":>6} {"91–365":>7} {"1–4 года":>9} '
-          f'{f"нет до {TAU}":>11} {"RMST(τ)":>8}')
-    show = lambda t: f'≥ {TAU}' if t >= TAU else str(int(t))
+    groups = ['низкий', 'умеренный', 'высокий', 'очень высокий']
+    print('Риск смерти от ССЗ к сроку (с изменениями); дата — медиана S(t), только при риске до τ выше 50%')
+    print(f'{"модель":<19} {"дата":>7} {"с изм.":>7} ' + ' '.join(f'{f"{h} дн":>7}' for h in HORIZONS)
+          + f' {"группа риска":>14} {f"до {TAU}":>8}')
+    show = lambda t: '—' if t >= TAU else str(int(t))
     for name, title in names.items():
         base = predictor.predict(x, name)
         edit = predictor.predict(x_edit, name)
-        w = edit['windows'][0]
-        print(f'{title:<19} {show(base["time"][0]):>9} {show(edit["time"][0]):>8} {w[0]:>7.1%} {w[1]:>6.1%} {w[2]:>7.1%} '
-              f'{w[3]:>9.1%} {w[4]:>11.1%} {edit["rmst"][0]:>8.0f}')
+        r = edit['risks'][0]
+        print(f'{title:<19} {show(base["time"][0]):>7} {show(edit["time"][0]):>7} ' + ' '.join(f'{v:>7.1%}' for v in r)
+              + f' {groups[risk_group(r[-1])]:>14} {1 - edit["s_tau"][0]:>8.1%}')
+    cohort = predictor.bundle['meta']['cohort_risks']
+    print(f'{"среднее по когорте":<19} {"":>7} {"":>7} ' + ' '.join(f'{v:>7.1%}' for v in cohort))
     if 'stg' in names:
         m = predictor.models['stg']
         _, P, F_late = predictor.staged(x_edit)
@@ -1042,7 +1218,8 @@ def cmd_predict(args):
         labels = [f'ранняя смерть ≤ {STAGED_EARLY_DAYS} дн.', f'смерть от ССЗ на {STAGED_EARLY_DAYS + 1}–{TAU - 1}-й день',
                   f'жив дольше {TAU} дн.']
         print(f'Конвейер: {"; ".join(f"{l} {p:.1%}" for l, p in zip(labels, P[0]))}')
-        print(f'  наиболее вероятная группа — {labels[group[0]]}; время внутри неё (справочно): {show(route_time[0])} дн.')
+        route = f'≥ {TAU}' if route_time[0] >= TAU else int(route_time[0])
+        print(f'  наиболее вероятная группа — {labels[group[0]]}; время внутри неё (справочно): {route} дн.')
 
 
 def main():

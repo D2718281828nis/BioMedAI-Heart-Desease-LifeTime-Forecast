@@ -18,6 +18,10 @@
   const TAU = BUNDLE.meta.tau;
   const MODELS = BUNDLE.meta.model_names;
   const MODEL_KEYS = Object.keys(MODELS);
+  // Сроки оценки риска (1, 3, 6, 9 и 12 месяцев) и средний риск по когорте к ним (Каплан — Мейер)
+  const HORIZONS = BUNDLE.meta.horizons;
+  const COHORT_RISKS = BUNDLE.meta.cohort_risks;
+  const DEFAULT_HORIZON = HORIZONS.length - 1;
   // Модель по умолчанию: для balanced_dataset.csv — многоэтапный конвейер, для всей когорты — CoxPH. Все модели
   // откалиброваны на всю когорту, поэтому метрики в таблице моделей — на отложенных пациентах всей когорты
   const DEFAULT_MODELS = { balanced: 'stg', full: 'cph' };
@@ -76,11 +80,6 @@
     const time = PATIENTS.time[g];
     return PATIENTS.target[g] || time >= TAU ? { value: Math.min(time, TAU), exact: true } : { value: time, exact: false };
   }
-  // |прогноз − факт|; при нижней границе — наименьшая возможная ошибка (0, если прогноз не меньше границы)
-  function predictionError(g, predicted) {
-    const o = observed(g);
-    return o.exact ? Math.abs(predicted - o.value) : Math.max(0, o.value - predicted);
-  }
 
   // ---------------------------------------------------------------------------
   // Вспомогательные функции
@@ -121,12 +120,14 @@
     const o = observed(g);
     return o.exact ? fmtTime(o.value) : `≥ ${fmtDays(o.value)}`;
   };
-  // |ошибка|; если наблюдение закончилось раньше τ без смерти от ССЗ — только нижняя граница
-  const fmtError = (g, predicted) => {
-    const o = observed(g), e = predictionError(g, predicted);
-    return o.exact ? fmtDays(e) : `≥ ${fmtDays(e)}`;
-  };
   const fmtPct = (v) => I18N.pct(v);
+  // Риск относительно среднего по когорте: «в 2,0 раза выше среднего (2,5%)», «на уровне среднего», «ниже среднего»
+  const ratioText = (p, avg) => {
+    const r = p / avg;
+    return r >= 1.25 ? t('ratio.up', { r: I18N.fixed(r, 1), v: fmtPct(avg) })
+      : r > 0.8 ? t('ratio.same', { v: fmtPct(avg) }) : t('ratio.down', { v: fmtPct(avg) });
+  };
+  const riskGroupLabel = (risk1y) => t(`riskgroup.${predictor.riskGroup(risk1y)}`);
   // Значение для поля ввода — всегда с точкой; для подписей — I18N.num по правилам языка
   const fmtValue = (v) => String(+(+v).toFixed(4));
   const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -154,6 +155,7 @@
     hovered: -1,
     theme: saved.theme,
     highlightSudden: saved.highlightSudden === true,
+    horizon: Number.isInteger(saved.horizon) && saved.horizon >= 0 && saved.horizon < HORIZONS.length ? saved.horizon : DEFAULT_HORIZON,
     values: PATIENTS.X.map((row) => row.slice()),
   };
   // Изменения храним по ID пациента: он одинаков в обоих датасетах
@@ -188,7 +190,7 @@
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
           dataset: state.dataset, perplexity: state.perplexity, models: state.models, defaults: DEFAULT_MODELS,
           selectedId: PATIENTS.id[state.selected],
-          theme: state.theme, lang: I18N.lang, highlightSudden: state.highlightSudden, editsById,
+          theme: state.theme, lang: I18N.lang, highlightSudden: state.highlightSudden, horizon: state.horizon, editsById,
         }));
       } catch (e) { /* хранилище недоступно — состояние живёт только до перезагрузки */ }
     }, 200);
@@ -528,10 +530,13 @@
   }
 
   function suddenParams(g) {
-    const share = PATIENTS.sudden_survived[g];
+    const h = PATIENTS.sudden_horizon[g];
+    const avg = COHORT_RISKS[HORIZONS.indexOf(h)];
     return {
-      d: fmtDays(PATIENTS.time[g]), k: BUNDLE.meta.sudden_neighbours, share: fmtPct(share),
-      horizon: t(`sudden.h${PATIENTS.sudden_horizon[g]}`), wrong: Math.round(100 * share),
+      d: fmtDays(PATIENTS.time[g]), k: BUNDLE.meta.sudden_neighbours, share: fmtPct(PATIENTS.sudden_survived[g]),
+      horizon: t(`sudden.h${h}`), risk: fmtPct(PATIENTS.sudden_risk[g]), avg: fmtPct(avg),
+      ratio: ratioText(PATIENTS.sudden_risk[g], avg), top: fmtPct(PATIENTS.sudden_top_risk[g]),
+      topModel: MODELS[MODEL_KEYS[PATIENTS.sudden_top_model[g]]],
     };
   }
 
@@ -539,6 +544,7 @@
     return {
       risk: fmtPct(PATIENTS.unexpected_risk[g]), time: fmtDays(PATIENTS.time[g]), tau: fmtDays(TAU),
       k: BUNDLE.meta.sudden_neighbours, died: fmtPct(PATIENTS.unexpected_died[g]),
+      consensus: fmtPct(PATIENTS.unexpected_consensus[g]),
     };
   }
 
@@ -625,14 +631,25 @@
     const time = PATIENTS.time[g], target = PATIENTS.target[g];
 
     $('prediction-sub').textContent = t('pred.sub', { id: PATIENTS.id[g], model: MODELS[m] });
-    $('hero-label').textContent = t(edited ? 'hero.edited' : 'hero.dataset', { model: MODELS[m] });
-    $('hero-value').replaceChildren(fmtTime(cur.time), el('span', { class: 'unit', text: t('unit.days') }));
-    if (edited) {
+    // Дата (медиана S(t)) — только если вероятность смерти от ССЗ до τ выше 50%; иначе — риск до τ
+    const dated = cur.time < TAU;
+    const tau = fmtDays(TAU);
+    $('hero-label').textContent = t(dated ? (edited ? 'hero.edited' : 'hero.dataset')
+      : (edited ? 'hero.unlikelyEdited' : 'hero.unlikely'), { model: MODELS[m], tau });
+    $('hero-value').replaceChildren(dated ? fmtTime(cur.time) : fmtPct(1 - cur.sTau),
+      el('span', { class: 'unit', text: dated ? t('unit.days') : t('hero.riskUnit', { tau }) }));
+    if (edited && dated && base.time < TAU) {
       const diff = cur.time - base.time;
       const arrow = diff > 0 ? '▲' : diff < 0 ? '▼' : '';
       $('hero-delta').replaceChildren(
         el('b', { text: `${arrow} ${diff >= 0 ? '+' : '−'}${days(Math.abs(diff))}` }),
         t('hero.delta', { v: fmtTime(base.time) }));
+    } else if (edited) {
+      const diff = 100 * (base.sTau - cur.sTau);
+      const arrow = diff > 0.05 ? '▲' : diff < -0.05 ? '▼' : '';
+      $('hero-delta').replaceChildren(
+        el('b', { text: `${arrow} ${diff >= 0 ? '+' : '−'}${I18N.fixed(Math.abs(diff), 1)} ${t('unit.pp')}` }),
+        t('hero.deltaRisk', { v: fmtPct(1 - base.sTau) }));
     } else {
       $('hero-delta').textContent = t('hero.hint');
     }
@@ -642,8 +659,8 @@
     $('facts').replaceChildren(...[
       fact(t('fact.time'), days(time), t('fact.outcome', { outcome: outcome(g), t: target })),
       fact(t('fact.rmst'), days(cur.rmst), datasetOr(days, base.rmst, t('fact.rmstNote'))),
-      fact(t('fact.alive'), I18N.fixed(cur.sTau, 2),
-        datasetOr((v) => I18N.fixed(v, 2), base.sTau, t('fact.aliveNote', { tau: fmtDays(TAU) }))),
+      dated ? fact(t('fact.alive'), I18N.fixed(cur.sTau, 2),
+        datasetOr((v) => I18N.fixed(v, 2), base.sTau, t('fact.aliveNote', { tau: fmtDays(TAU) }))) : null,
       // Каскад и модель для balanced: вероятность их классификатора
       cur.stage && cur.stage.kind === 'cascade' ? fact(t('fact.cascadeStage', { days: fmtDays(cur.stage.days) }), fmtPct(cur.stage.p), t('fact.cascadeNote')) : null,
       cur.stage && cur.stage.kind === 'balanced' ? fact(t('fact.balStage', { tau: fmtDays(TAU) }), fmtPct(cur.stage.p), t('fact.balNote')) : null,
@@ -651,11 +668,10 @@
       ...(cur.stage && cur.stage.kind === 'staged' ? stagedFacts(cur.stage, fact) : []),
     ].filter(Boolean));
     // Если наблюдение закончилось до τ без смерти от ССЗ, min(T, τ) неизвестно — есть только нижняя граница
-    const subKey = observed(g).exact ? 'hero.sub' : PATIENTS.death_any[g] ? 'hero.subOther' : 'hero.subCensored';
-    $('hero-sub').textContent = (cur.time >= TAU ? t('hero.horizon', { tau: fmtDays(TAU) }) + ' ' : '')
-      + t(subKey, { tau: fmtDays(TAU), v: observed(g).exact ? fmtObserved(g) : fmtDays(time) });
+    const factKey = observed(g).exact ? 'hero.fact' : PATIENTS.death_any[g] ? 'hero.factOther' : 'hero.factCensored';
+    $('hero-sub').textContent = `${t(dated ? 'hero.sub' : 'hero.horizon', { tau })} ${t(factKey, { v: observed(g).exact ? fmtObserved(g) : fmtDays(time) })}`;
 
-    renderRiskProfile(cur.windows, edited ? base.windows : null);
+    renderRiskProfile(g, cur.risks, edited ? base.risks : null, base.risks);
     const note = $('sudden-note');
     const groupText = groupNote(g);
     note.hidden = !groupText;
@@ -698,44 +714,88 @@
     ];
   }
 
-  const WINDOW_KEYS = ['w30', 'w90', 'w365', 'w1500', 'wNone'];
-  function renderRiskProfile(windows, datasetWindows) {
-    const cohort = BUNDLE.meta.cohort_windows;
+  // Риски смерти от ССЗ к срокам: полоса — пациент, штрих — среднее по когорте; шкала 0–PROFILE_SCALE
+  const PROFILE_SCALE = 0.5;
+  const scalePct = (p) => `${(100 * Math.min(p / PROFILE_SCALE, 1)).toFixed(1)}%`;
+  function renderRiskProfile(g, risks, datasetRisks, baseRisks) {
+    const risk1y = risks[risks.length - 1];
     $('risk-profile').replaceChildren(
-      el('div', { class: 'profile-title', text: t('profile.title') }),
-      ...windows.map((p, k) => el('div', { class: 'profile-row' },
-        el('span', { class: 'profile-label', text: t(`profile.${WINDOW_KEYS[k]}`, { tau: fmtDays(TAU) }) }),
+      el('div', { class: 'profile-title', text: t('profile.title', { scale: fmtPct(PROFILE_SCALE) }) }),
+      el('div', { class: 'profile-group' }, t('profile.group'), ' ', el('b', { text: riskGroupLabel(risk1y) }),
+        datasetRisks ? ` · ${t('profile.dataset', { v: riskGroupLabel(datasetRisks[datasetRisks.length - 1]) })}` : ''),
+      ...risks.map((p, k) => el('div', { class: 'profile-row' },
+        el('span', { class: 'profile-label', text: t(`profile.h${HORIZONS[k]}`) }),
         el('span', { class: 'profile-track' },
-          el('span', { class: `profile-bar t${k === 4 ? 0 : 1}`, style: `width:${(100 * p).toFixed(1)}%` }),
-          el('span', { class: 'profile-cohort', style: `left:${(100 * cohort[k]).toFixed(1)}%`, title: t('profile.cohort') })),
+          el('span', { class: 'profile-bar t1', style: `width:${scalePct(p)}` }),
+          el('span', { class: 'profile-cohort', style: `left:${scalePct(COHORT_RISKS[k])}`, title: t('profile.cohort') })),
         el('b', { text: fmtPct(p) }),
-        el('small', { text: datasetWindows ? t('profile.dataset', { v: fmtPct(datasetWindows[k]) }) : t('profile.cohortValue', { v: fmtPct(cohort[k]) }) }))),
+        el('small', { text: datasetRisks ? t('profile.dataset', { v: fmtPct(datasetRisks[k]) }) : ratioText(p, COHORT_RISKS[k]) }))),
+      outcomeVsRisk(g, baseRisks),
     );
   }
 
+  // Исход пациента рядом с риском, который модель давала по значениям датасета: вместо ошибки даты
+  function outcomeVsRisk(g, risks) {
+    const time = PATIENTS.time[g], last = HORIZONS.length - 1;
+    let text = null;
+    if (PATIENTS.target[g] && time <= HORIZONS[last]) {
+      const k = HORIZONS.findIndex((h) => time <= h);
+      text = t('profile.death', { d: fmtDays(time), h: t(`profile.h${HORIZONS[k]}`).toLowerCase(), p: fmtPct(risks[k]),
+        ratio: ratioText(risks[k], COHORT_RISKS[k]) });
+    } else if (PATIENTS.target[g]) {
+      text = t('profile.deathLate', { d: fmtDays(time), p: fmtPct(risks[last]) });
+    } else if (time > HORIZONS[last]) {
+      text = t('profile.survived', { d: fmtDays(time), p: fmtPct(risks[last]) });
+    }
+    return text ? el('div', { class: 'profile-outcome', text }) : null;
+  }
+
+  // Метрики моделей к выбранному сроку — на отложенных пациентах всей когорты
   function renderModelTable() {
     const g = state.selected;
     const edited = editedSet.has(g);
-    const metrics = BUNDLE.metrics;
+    const metrics = BUNDLE.metrics, j = state.horizon;
     $('model-table').tBodies[0].replaceChildren(...MODEL_KEYS.map((m) => {
       const radio = el('input', { type: 'radio', name: 'model-radio', value: m, checked: m === state.model });
       radio.addEventListener('change', () => setModel(m));
       const tr = el('tr', { class: m === state.model ? 'active' : '' },
         el('td', {}, el('label', {}, radio, MODELS[m])),
         el('td', { text: I18N.fixed(metrics[m].c_index, 3) }),
-        el('td', { text: I18N.fixed(metrics[m].auc_30, 3) }),
-        el('td', { text: I18N.fixed(metrics[m].auc_365, 3) }),
-        el('td', { text: I18N.fixed(metrics[m].ibs, 3) }),
-        el('td', { text: fmtDays(metrics[m].mae) }),
+        el('td', { text: I18N.fixed(metrics[m].auc[j], 3) }),
+        el('td', { text: I18N.fixed(metrics[m].eo[j], 2) }),
+        el('td', { text: I18N.fixed(metrics[m].ibs, 4) }),
         el('td', { text: t('days.short', { n: fmtTime(baseTime[m][g]) }) }),
         el('td', { text: edited ? t('days.short', { n: fmtTime(curTime[m][g]) }) : '—' }));
       tr.addEventListener('click', (e) => { if (e.target !== radio) setModel(m); });
       return tr;
     }));
-    const r = metrics[state.model];
+    const r = metrics[state.model], deaths = BUNDLE.meta.test_deaths[j];
     $('models-note').textContent = t('models.note', {
-      n: BUNDLE.meta.test_size, model: MODELS[state.model], c: I18N.fixed(r.c_index, 3),
-      auc30: I18N.fixed(r.auc_30, 3), auc365: I18N.fixed(r.auc_365, 3), ibs: I18N.fixed(r.ibs, 3), mae: fmtDays(r.mae),
+      n: BUNDLE.meta.test_size, model: MODELS[state.model], h: t(`profile.h${HORIZONS[j]}`).toLowerCase(),
+      auc: I18N.fixed(r.auc[j], 3), eo: I18N.fixed(r.eo[j], 2), c: I18N.fixed(r.c_index, 3), ibs: I18N.fixed(r.ibs, 4),
+      deaths: fmtDays(deaths),
+    }) + (deaths < 20 ? t('models.few') : '.');
+    renderCalibration();
+  }
+
+  // Прогноз и факт по группам риска для выбранной модели — прогнозы вне выборки на обучающей когорте
+  function renderCalibration() {
+    const m = state.model, j = state.horizon;
+    const groups = BUNDLE.calibration[m];
+    const patientGroup = predictor.riskGroup(baseRisk[m][state.selected]);
+    $('calib-title').textContent = t('calib.title', { model: MODELS[m] });
+    $('calib-table').tHead.rows[0].replaceChildren(
+      el('th', { scope: 'col', text: t('calib.group') }), el('th', { scope: 'col', text: t('calib.n') }),
+      ...HORIZONS.map((h, k) => el('th', { scope: 'col', class: k === j ? 'active' : '', text: t(`horizon.${h}`) })));
+    $('calib-table').tBodies[0].replaceChildren(...groups.map((grp, i) => el('tr', { class: i === patientGroup ? 'active' : '' },
+      el('td', { text: t(`riskgroup.${i}`) }),
+      el('td', { text: fmtDays(grp.n) }),
+      ...HORIZONS.map((_, k) => el('td', { class: k === j ? 'active' : '',
+        text: grp.n ? `${fmtPct(grp.pred[k])} / ${fmtPct(grp.obs[k])}` : '—' })))));
+    const cv = BUNDLE.metrics_cv[m], meta = BUNDLE.meta;
+    $('calib-note').textContent = t('calib.note', {
+      n: fmtDays(meta.cv_size), folds: meta.cv_folds, d1: fmtDays(meta.cv_deaths[0]), d12: fmtDays(meta.cv_deaths[meta.cv_deaths.length - 1]),
+      h: t(`profile.h${HORIZONS[j]}`).toLowerCase(), auc: I18N.fixed(cv.auc[j], 3), eo: I18N.fixed(cv.eo[j], 2),
     });
   }
 
@@ -997,8 +1057,8 @@
     ['time', 'table.time', (g) => PATIENTS.time[g]],
     ['real', 'table.real', (g) => observed(g).value],
     ['pred', 'table.pred', (g) => baseTime[state.model][g]],
-    ['error', 'table.error', (g) => predictionError(g, baseTime[state.model][g])],
     ['risk', 'table.risk', (g) => baseRisk[state.model][g]],
+    ['group', 'table.group', (g) => baseRisk[state.model][g]],
     ['edited', 'table.edit', (g) => (editedSet.has(g) ? curTime[state.model][g] : -1)],
   ];
 
@@ -1040,8 +1100,8 @@
       el('td', { text: fmtDays(PATIENTS.time[g]) }),
       el('td', { text: fmtObserved(g) }),
       el('td', { text: fmtTime(baseTime[m][g]) }),
-      el('td', { text: fmtError(g, baseTime[m][g]) }),
       el('td', { text: fmtPct(baseRisk[m][g]) }),
+      el('td', { text: riskGroupLabel(baseRisk[m][g]) }),
       el('td', { text: editedSet.has(g) ? fmtTime(curTime[m][g]) : '—' }),
     );
   }
@@ -1201,6 +1261,7 @@
     for (const option of $('dataset-select').options) {
       option.textContent = t(`dataset.${option.value}`, { n: fmtDays(getView(option.value).n) });
     }
+    for (const option of $('horizon-select').options) option.textContent = t(`horizon.${HORIZONS[option.value]}`);
     updateStatus();
   }
 
@@ -1233,6 +1294,15 @@
     for (const key of Object.keys(DATASETS)) datasetSelect.append(el('option', { value: key }));
     datasetSelect.value = state.dataset;
     datasetSelect.addEventListener('change', () => setDataset(datasetSelect.value));
+    // Срок, к которому показываются метрики моделей
+    const horizonSelect = $('horizon-select');
+    HORIZONS.forEach((_, k) => horizonSelect.append(el('option', { value: k })));
+    horizonSelect.value = state.horizon;
+    horizonSelect.addEventListener('change', () => {
+      state.horizon = Number(horizonSelect.value);
+      renderModelTable();
+      save();
+    });
     renderTexts();
     document.querySelectorAll('[data-lang]').forEach((button) => {
       button.addEventListener('click', () => setLang(button.dataset.lang));

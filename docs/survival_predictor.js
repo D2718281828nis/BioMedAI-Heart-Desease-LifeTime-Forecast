@@ -33,9 +33,26 @@
     return S;
   }
 
+  // Калибратор оценки риска s модели ноутбука: ковариаты s и (s − s̄)² (у линейного — только s), s ограничена
+  // вершиной параболы; модель Кокса или Weibull — как SurvivalTimePredictor._calibrated() в survival_time_predictor.py
+  function calibrated(cal, score, tau) {
+    let s = score;
+    if (cal.clip[0] !== null) s = Math.max(s, cal.clip[0]);
+    if (cal.clip[1] !== null) s = Math.min(s, cal.clip[1]);
+    const z = [s, (s - cal.mean) ** 2].slice(0, cal.beta.length);
+    if (cal.type === 'cox') return coxSurvival(cal, z);
+    let logLambda = cal.intercept;
+    z.forEach((v, k) => { logLambda += v * cal.beta[k]; });
+    const lambda = Math.exp(logLambda), rho = Math.exp(cal.rho_intercept);
+    const S = new Float64Array(tau);
+    for (let t = 0; t < tau; t++) S[t] = Math.exp(-Math.pow(t / lambda, rho));
+    return S;
+  }
+
   function createPredictor(bundle) {
     const { features, scaler, models } = bundle;
     const tau = bundle.meta.tau;
+    const horizons = bundle.meta.horizons;
     // Модели используют только признаки, известные при поступлении (model_features); на вход подаются все признаки
     const modelFeatures = bundle.model_features || features;
     const columns = modelFeatures.map((f) => features.indexOf(f));
@@ -120,22 +137,22 @@
       const z = scale(xRaw);
       const m = models[name];
       switch (name) {
-        case 'cph':
-          return coxSurvival(m, z);
+        case 'cph': {
+          let s = 0;
+          for (let k = 0; k < d; k++) s += (z[k] - m.center[k]) * m.beta[k];
+          return calibrated(m.calibrator, s, tau);
+        }
         case 'aft': {
           let s = m.lambda_intercept;
           for (let k = 0; k < d; k++) s += z[k] * m.lambda_beta[k];
-          const lambda = Math.exp(s), rho = Math.exp(m.rho_intercept);
-          const S = new Float64Array(tau);
-          for (let t = 0; t < tau; t++) S[t] = Math.exp(-Math.pow(t / lambda, rho));
-          return S;
+          return calibrated(m.calibrator, s, tau);
         }
         case 'xgb':
-          return coxSurvival(m.calibrator, [xgbLogRisk(z)]);
+          return calibrated(m.calibrator, xgbLogRisk(z), tau);
         case 'nn':
-          return coxSurvival(m.calibrator, [nnLogit(z)]);
+          return calibrated(m.calibrator, nnLogit(z), tau);
         case 'rn':
-          return coxSurvival(m.calibrator, [rnLogit(z)]);
+          return calibrated(m.calibrator, rnLogit(z), tau);
         case 'two':
           return twoStage(z).curve;
         case 'bal':
@@ -224,7 +241,7 @@
 
     // Прогноз — как point_prediction() в scripts/survival_time_predictor.py:
     // time — медиана S(t) (первый день, когда S(t) ≤ 0,5, или τ — «смерти от ССЗ в пределах τ не ожидается»);
-    // windows — вероятности окон: смерть от ССЗ в первые 30 дней, на 31–90-й, 91–365-й, 366–1499-й день, нет до τ;
+    // risks — риски смерти от ССЗ к срокам meta.horizons (1, 3, 6, 9 и 12 месяцев);
     // rmst — ожидаемое число дней без смерти от ССЗ в пределах τ; sTau = S(τ); risk1y — риск смерти от ССЗ за год;
     // stage — у каскада, модели для balanced и конвейера: вероятности их классификаторов
     const SPECIAL = { two: (z) => twoStage(z), bal: (z) => balanced(z), stg: (z, x) => staged(z, x) };
@@ -238,11 +255,15 @@
         if (time === n && curve[t] <= 0.5) time = t;
       }
       const S = (day) => curve[Math.min(day, n - 1)];
-      const windows = [1 - S(30), S(30) - S(90), S(90) - S(365), S(365) - S(n - 1), S(n - 1)];
-      return { curve, time, rmst, sTau: S(n - 1), risk1y: 1 - S(365), windows, stage: special ? special.stage : null };
+      const risks = horizons.map((day) => 1 - S(day));
+      return { curve, time, rmst, sTau: S(n - 1), risk1y: 1 - S(365), risks, stage: special ? special.stage : null };
     }
 
-    return { features, modelFeatures, tau, modelNames: bundle.meta.model_names, scale, survival, predict };
+    // Группа риска 0–3 (низкий, умеренный, высокий, очень высокий) по риску за 12 месяцев — как risk_group()
+    const edges = bundle.meta.risk_group_edges;
+    const riskGroup = (risk1y) => edges.filter((edge) => risk1y >= edge).length;
+
+    return { features, modelFeatures, tau, horizons, modelNames: bundle.meta.model_names, scale, survival, predict, riskGroup };
   }
 
   return { createPredictor };
