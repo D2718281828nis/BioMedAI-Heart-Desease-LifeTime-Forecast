@@ -53,7 +53,7 @@
     const { features, scaler, models } = bundle;
     const tau = bundle.meta.tau;
     const horizons = bundle.meta.horizons;
-    // Модели используют только признаки, известные при поступлении (model_features); на вход подаются все признаки
+    // Признаки моделей (model_features; сейчас все 30, включая известные только после выписки); на вход подаются все признаки
     const modelFeatures = bundle.model_features || features;
     const columns = modelFeatures.map((f) => features.indexOf(f));
     const d = modelFeatures.length;
@@ -190,12 +190,14 @@
     // и медиана времени внутри неё
     const stg = models.stg;
     const clusters = stg.clusters;
+    // Кластеры — по признакам при поступлении (clusters.features), даже если модели используют и признаки после выписки
+    const clusterColumns = (clusters.features || modelFeatures).map((f) => features.indexOf(f));
     function clusterOf(xRaw) {
       let best = 0, bestD = Infinity;
       clusters.centroids.forEach((centroid, c) => {
         let dist = 0;
-        for (let k = 0; k < d; k++) {
-          const v = (xRaw[columns[k]] - clusters.mean[k]) / clusters.scale[k] - centroid[k];
+        for (let k = 0; k < clusterColumns.length; k++) {
+          const v = (xRaw[clusterColumns[k]] - clusters.mean[k]) / clusters.scale[k] - centroid[k];
           dist += v * v;
         }
         if (dist < bestD) { bestD = dist; best = c; }

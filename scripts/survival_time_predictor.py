@@ -7,8 +7,10 @@
 Исправления по сравнению с ноутбуком.
 
 1. Признаки doctor (наблюдающий врач) и llo (льготное лекарственное обеспечение) назначаются после выписки:
-умершие рано их не получают (92% и 100% умерших от ССЗ в первые 30 дней), то есть в них частично заложен исход
-(immortal time bias). Модели используют только 28 признаков, известных при поступлении (MODEL_FEATURES).
+умершие рано их не получают (92% и 100% умерших от ССЗ в первые 30 дней; ЛЛО нет ни у одного из 69 умерших от ССЗ
+в первые 180 дней), то есть в них частично заложен исход (immortal time bias). Модели всё же обучаются на всех
+30 признаках (USE_POST_DISCHARGE): прогноз с ними — ретроспективный, по данным, известным после выписки. Похожие
+пациенты и кластеры многоэтапного конвейера — по 28 признакам при поступлении (admission_features).
 
 2. df_balanced — это смерти от ССЗ и пациенты, наблюдавшиеся не меньше τ. Пациентов включали в исследование
 около двух лет, а закончилось оно для всех в один день: живые наблюдались 889–1634 дня, и 1098 пациентов,
@@ -178,8 +180,13 @@ PLAUSIBLE = {'age': (18, 105), 'ef_hosp': (10, 80), 'bpm': (30, 220), 'sysAP': (
              'hb': (60, 200), 'leukoc': (1, 50), 'tromboc': (20, 1000), 't_chol': (1, 15), 'ldl': (0.3, 12),
              'glu': (2, 35), 'crea': (30, 1000)}
 
-# Признаки, известные только после выписки: в моделях не используются (см. docstring)
+# Признаки, известные только после выписки (см. docstring)
 POST_DISCHARGE = ('doctor', 'llo')
+# Модели обучаются и на них — вариант «задним числом»: при кросс-валидации на 1204 обучающих AUC смерти от ССЗ
+# за 12 месяцев растёт на 0,04–0,07 (у Staged pipeline 0,79 → 0,84), но прирост дают смерти, случившиеся до назначения
+# ЛЛО и врача. Для нового пациента при поступлении (llo = 0, doctor = 0) риск завышен на 28–95%, а AUC не выше, чем
+# без них; влияние ЛЛО на прогноз завышено (landmark-анализ, scripts/llo_landmark_analysis.py)
+USE_POST_DISCHARGE = True
 # Роль пациента в обучении (patients.split в docs/survival_model.js)
 SPLIT_CALIBRATION, SPLIT_TRAIN, SPLIT_TEST = 0, 1, 2
 SPLIT_NAMES = {SPLIT_CALIBRATION: 'обучающая выборка (цензурирован до τ)',
@@ -203,9 +210,14 @@ def load_full_dataset(path=FULL_XLSX):
     return data, features, death_any
 
 
-def model_features(features):
-    """Признаки моделей: все, кроме известных только после выписки."""
+def admission_features(features):
+    """Признаки, известные при поступлении: все, кроме назначаемых после выписки."""
     return [f for f in features if f not in POST_DISCHARGE]
+
+
+def model_features(features):
+    """Признаки моделей: все 30 (USE_POST_DISCHARGE) или только известные при поступлении."""
+    return list(features) if USE_POST_DISCHARGE else admission_features(features)
 
 
 def balanced_subset(full, check_csv=BALANCED_CSV):
@@ -513,7 +525,7 @@ def staged_clustering(full, features):
     for c in range(STAGED_CLUSTERS):
         z = Z[member == c].mean(axis=0)
         profile.append([{'feature': features[k], 'z': round(float(z[k]), 2)} for k in np.argsort(-np.abs(z))[:3]])
-    return dict(mean=mean, scale=scale, centroids=centroids, profile=profile)
+    return dict(features=list(features), mean=mean, scale=scale, centroids=centroids, profile=profile)
 
 
 def cluster_of(clustering, X_raw):
@@ -533,13 +545,13 @@ def train_staged(full, features, train_idx, cohort_train_idx, scaler, q):
     from lifelines import CoxPHFitter
     from sklearn.linear_model import LogisticRegression
 
-    clustering = staged_clustering(full, features)
+    clustering = staged_clustering(full, admission_features(features))
     t_all = full.loc[cohort_train_idx, 'time'].values.astype(float)
     death_all = full.loc[cohort_train_idx, 'target'].values.astype(bool)
     early_all = death_all & (t_all <= STAGED_EARLY_DAYS)
     known = early_all | (t_all > STAGED_EARLY_DAYS)
     X_known = full.loc[cohort_train_idx, features].values[known]
-    c_all = cluster_of(clustering, X_known)
+    c_all = cluster_of(clustering, full.loc[cohort_train_idx, clustering['features']].values[known])
     stage1 = LogisticRegression(C=0.03, max_iter=5000).fit(
         np.column_stack([scaler.transform(X_known), _one_hot(c_all)]), early_all[known])
 
@@ -583,8 +595,8 @@ def staged_route(P, early_days, F_late):
 
 def library_staged(st, X_raw, X_sc, features):
     """(S(t), вероятности групп, F_поздн) средствами scikit-learn и lifelines; X_raw — признаки моделей без
-    стандартизации (для кластера)."""
-    cluster = cluster_of(st['clustering'], X_raw)
+    стандартизации (для кластера — только признаки при поступлении)."""
+    cluster = cluster_of(st['clustering'], X_raw[:, [features.index(f) for f in st['clustering']['features']]])
     p1 = st['stage1'].predict_proba(np.column_stack([X_sc, _one_hot(cluster)]))[:, 1]
     p2 = st['stage2'].predict_proba(X_sc)[:, 1]
     late = pd.DataFrame(X_sc, columns=features)[st['late_features']]
@@ -703,7 +715,7 @@ def _export_staged(st, features):
     cl = st['clustering']
     return {'type': 'staged', 'early_days': STAGED_EARLY_DAYS,
             # кластеры всей когорты: стандартизация, центроиды; ранние смерти и число пациентов в обучающей когорте
-            'clusters': {'mean': _round(cl['mean'], 12), 'scale': _round(cl['scale'], 12),
+            'clusters': {'features': cl['features'], 'mean': _round(cl['mean'], 12), 'scale': _round(cl['scale'], 12),
                          'centroids': [_round(c, 10) for c in cl['centroids']], 'profile': cl['profile'],
                          'n': st['cluster_n'].tolist(), 'early': st['cluster_early'].tolist()},
             # этап 1: коэффициенты признаков, затем — принадлежности к каждому кластеру
@@ -811,7 +823,8 @@ class SurvivalTimePredictor:
         X_sc = self._scale(X_raw)
         m = self.models['stg']
         cl = m['clusters']
-        Zc = (np.atleast_2d(np.asarray(X_raw, dtype=float))[:, self._columns] - np.array(cl['mean'])) / np.array(cl['scale'])
+        columns = [self.features.index(f) for f in cl.get('features', self.model_features)]  # признаки при поступлении
+        Zc = (np.atleast_2d(np.asarray(X_raw, dtype=float))[:, columns] - np.array(cl['mean'])) / np.array(cl['scale'])
         cluster = ((Zc[:, None, :] - np.array(cl['centroids'])[None]) ** 2).sum(axis=-1).argmin(axis=1)
         coef1 = np.array(m['stage1']['coef'])
         d = X_sc.shape[1]
@@ -992,7 +1005,7 @@ def train_all_models(full, df, features, bal_train, cal_train, log=lambda *a: No
     каскад, Balanced mixture и конвейер с частичными метками цензурированных до τ (cal_train)."""
     train_all = bal_train.append(cal_train)
     log(f'Обучаем модели ноутбука на df_balanced ({len(bal_train)} пациентов, {len(features)} признаков при поступлении; '
-        f'без {", ".join(POST_DISCHARGE)})...')
+        f'{"включая известные после выписки " + ", ".join(POST_DISCHARGE) if USE_POST_DISCHARGE else "при поступлении"})...')
     m = train_models(df, features, bal_train)
     log(f'Калибруем S(t) на всей обучающей когорте ({len(train_all)} пациентов)...')
     calibrators = recalibrate(full, df, features, bal_train, cal_train, m)
@@ -1041,6 +1054,7 @@ def cmd_export(args):
     from lifelines import KaplanMeierFitter
     full, features, death_any = load_full_dataset(args.xlsx)
     mf = model_features(features)
+    adm = admission_features(features)  # похожие пациенты и кластеры — по признакам при поступлении
     df = balanced_subset(full)
     bal_train, cal_train, test_idx = split_cohort(full, df)
     train_all = bal_train.append(cal_train)
@@ -1049,14 +1063,14 @@ def cmd_export(args):
 
     # Эталонный прогноз библиотек — для всех пациентов полного датасета
     reference, staged_P, staged_F_late = library_curves(fitted, full[mf], mf)
-    staged_cluster = cluster_of(st['clustering'], full[mf].values.astype(float))
+    staged_cluster = cluster_of(st['clustering'], full[st['clustering']['features']].values.astype(float))
     staged_group, staged_time = staged_route(staged_P, st['early_days'], staged_F_late)
     reference_pred = {k: point_prediction(S) for k, S in reference.items()}
     cohort_km = KaplanMeierFitter().fit(full['time'], full['target'])
-    sudden = sudden_unexplained_deaths(full, mf, reference, cohort_km)
+    sudden = sudden_unexplained_deaths(full, adm, reference, cohort_km)
     p_death_staged = 1 - staged_P[:, 2]
     consensus_tau = np.median([1 - S[:, -1] for S in reference.values()], axis=0)
-    unexpected, unexpected_died = unexpected_survivals(full, mf, p_death_staged)
+    unexpected, unexpected_died = unexpected_survivals(full, adm, p_death_staged)
     print(f'Внезапных необъяснимых смертей от ССЗ (≤ {SUDDEN_MAX_DAY} дн., медиана риска моделей к сроку < '
           f'{SUDDEN_RISK_RATIO} средних, ≥ {SUDDEN_SURVIVED:.0%} похожих пережили срок): {int(sudden["sudden"].sum())}; '
           f'неожиданных выживаний (риск по конвейеру ≥ {UNEXPECTED_RISK:.0%}): {int(unexpected.sum())}')
@@ -1080,7 +1094,7 @@ def cmd_export(args):
     metrics_cv.pop('_km_s_tau')
     cv_deaths = metrics_cv.pop('_deaths')
     calibration = {k: risk_group_calibration(S, t_all, e_all) for k, S in oof.items()}
-    real_risk = similar_patients_risk(full, mf)
+    real_risk = similar_patients_risk(full, adm)
     confusion = risk_group_agreement(oof, real_risk[full.index.get_indexer(train_all)], t_all, e_all)
 
     # Пациенты — весь med_dataset_cardio.xlsx; balanced_dataset.csv — подмножество его строк
@@ -1099,7 +1113,8 @@ def cmd_export(args):
                  'sudden_max_day': SUDDEN_MAX_DAY, 'sudden_risk_ratio': SUDDEN_RISK_RATIO,
                  'sudden_survived': SUDDEN_SURVIVED, 'sudden_neighbours': SUDDEN_NEIGHBOURS},
         'features': features,
-        'model_features': mf,  # признаки моделей — без известных только после выписки
+        'model_features': mf,  # признаки моделей
+        'post_discharge': list(POST_DISCHARGE),  # из них известны только после выписки
         'columns': full.columns.tolist(),  # порядок столбцов датасетов — для выгрузки изменённого датасета
         'patients': {
             'id': full.index.tolist(),
@@ -1281,7 +1296,8 @@ def cmd_predict(args):
     print(f'Пациент ID {p["id"][row]}: {outcome_text(target, p["death_any"][row], time)}; {SPLIT_NAMES[p["split"][row]]}')
     print(f'Факт min(T, τ) = {real} дн.')
     for i in np.flatnonzero(x_edit != x):
-        unused = '' if predictor.features[i] in predictor.model_features else ' (моделями не используется: известен после выписки)'
+        unused = (' (моделями не используется: известен после выписки)' if predictor.features[i] not in predictor.model_features
+                  else ' (известен только после выписки: влияние на риск завышено)' if predictor.features[i] in POST_DISCHARGE else '')
         print(f'  {predictor.features[i]}: {x[i]:g} → {x_edit[i]:g}{unused}')
     names = MODEL_NAMES if args.model == 'all' else {args.model: MODEL_NAMES[args.model]}
     groups = ['низкий', 'умеренный', 'высокий', 'очень высокий']

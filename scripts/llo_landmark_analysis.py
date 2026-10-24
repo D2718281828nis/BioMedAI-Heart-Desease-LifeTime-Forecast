@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from lifelines import CoxPHFitter
 
-from survival_time_predictor import load_full_dataset, model_features
+from survival_time_predictor import admission_features, load_full_dataset
 
 warnings.filterwarnings('ignore')
 LANDMARKS = [0, 30, 90, 180, 365]
@@ -37,7 +37,7 @@ def landmark_hr(full, covariates, exposure_cols, landmark):
 
 def main():
     full, features, _ = load_full_dataset()
-    admission = model_features(features)
+    admission = admission_features(features)
     full = full.assign(doctor_cardiologist=(full['doctor'] == 2).astype(int), doctor_therapist=(full['doctor'] == 1).astype(int))
     rows = []
     for landmark in LANDMARKS:

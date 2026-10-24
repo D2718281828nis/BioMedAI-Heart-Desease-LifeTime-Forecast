@@ -25,8 +25,10 @@
   // Модель по умолчанию: для balanced_dataset.csv — многоэтапный конвейер, для всей когорты — CoxPH. Все модели
   // откалиброваны на всю когорту, поэтому метрики в таблице моделей — на отложенных пациентах всей когорты
   const DEFAULT_MODELS = { balanced: 'stg', full: 'cph' };
-  // Признаки, которые модели не используют (известны только после выписки)
+  // Признаки моделей (остальные в редакторе помечены «не используется»)
   const MODEL_FEATURES = new Set(BUNDLE.model_features || BUNDLE.features);
+  // Признаки, известные только после выписки (ЛЛО, наблюдающий врач): в моделях есть, но их вклад частично отражает исход
+  const POST_DISCHARGE = new Set(BUNDLE.post_discharge || []);
   const DEFAULT_DATASET = 'balanced';
   const STORAGE_KEY = 'survival-explorer:v1';
   const ITERATIONS = 1000;
@@ -1040,11 +1042,13 @@
         const reset = el('button', { class: 'reset', type: 'button', 'aria-label': t('param.reset', { label: text.label }), title: t('param.resetTitle'), text: '↺' });
         const orig = el('span', { class: 'param-orig' });
         const used = MODEL_FEATURES.has(f);
+        // Признак, известный только после выписки: модели его используют, но его влияние на риск завышено
+        const note = !used ? t('param.notUsed') : POST_DISCHARGE.has(f) ? t('param.postDischarge') : '';
         const row = el('div', { class: used ? 'param' : 'param unused' },
           el('div', { class: 'param-head' },
             el('span', { class: 'param-name' },
               el('label', { for: `num-${f}`, text: text.label }), el('code', { text: f }),
-              el('span', { class: 'param-enc', text: ` · ${encoding(text)}${used ? '' : ` · ${t('param.notUsed')}`}` })),
+              el('span', { class: 'param-enc', text: ` · ${encoding(text)}${note ? ` · ${note}` : ''}` })),
             orig),
           range, num, reset);
 
