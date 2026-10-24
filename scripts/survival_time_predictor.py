@@ -37,6 +37,7 @@ PSEUDO_NEIGHBOURS самых похожих на него пациентов, т
   export   обучить модели и калибраторы, записать параметры и оба датасета в docs/survival_model.js
            (их использует интерактивная страница docs/index.html — тот же расчёт на JavaScript)
   predict  прогноз времени для пациента, в том числе с изменёнными признаками
+  stamp    проставить в docs/index.html версии скриптов страницы (export делает это сам; нужно после правки docs/*.js)
 
 Примеры:
   python scripts/survival_time_predictor.py export
@@ -59,6 +60,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FULL_XLSX = ROOT / 'med_dataset_cardio.xlsx'
 BALANCED_CSV = ROOT / 'balanced_dataset.csv'
 MODEL_JS = ROOT / 'docs' / 'survival_model.js'
+PAGE_HTML = ROOT / 'docs' / 'index.html'
 JS_PREFIX = 'window.SURVIVAL_MODEL = '
 
 # Горизонт τ и дневная сетка — как в ноутбуке
@@ -1176,6 +1178,31 @@ def cmd_export(args):
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(JS_PREFIX + json.dumps(bundle, ensure_ascii=False, separators=(',', ':')) + ';\n', encoding='utf-8')
     print(f'Записано: {out.relative_to(ROOT) if out.is_relative_to(ROOT) else out} ({os.path.getsize(out) / 1024:.0f} КБ)')
+    if out.resolve().parent == PAGE_HTML.parent:
+        stamp_page()
+
+
+def stamp_page(index=PAGE_HTML):
+    """Версии скриптов страницы: src="app.js?v=<первые 10 знаков SHA-256 файла>". GitHub Pages разрешает браузеру
+    хранить каждый файл 10 минут отдельно, и сразу после публикации браузер мог взять новый index.html со старыми
+    app.js и i18n.js (флажок есть, а его текста и обработчика нет). С версией в адресе новый index.html загружает
+    новые скрипты, а сохранённый в кэше старый — свои старые."""
+    import hashlib
+    import re
+    html = index.read_text(encoding='utf-8')
+
+    def versioned(match):
+        name = match.group(1)
+        digest = hashlib.sha256((index.parent / name).read_bytes()).hexdigest()[:10]
+        return f'<script src="{name}?v={digest}"></script>'
+    stamped = re.sub(r'<script src="([\w.-]+\.js)(?:\?v=\w+)?"></script>', versioned, html)
+    if stamped != html:
+        index.write_text(stamped, encoding='utf-8')
+    print(f'Версии скриптов в {index.relative_to(ROOT)}: {"обновлены" if stamped != html else "актуальны"}')
+
+
+def cmd_stamp(args):
+    stamp_page()
 
 
 def sudden_unexplained_deaths(full, model_feature_names, curves, cohort_km):
@@ -1301,6 +1328,9 @@ def main():
     p_predict.add_argument('--model', default='all', choices=['all', *MODEL_NAMES])
     p_predict.add_argument('--model-file', default=MODEL_JS)
     p_predict.set_defaults(func=cmd_predict)
+
+    p_stamp = sub.add_parser('stamp', help='проставить в docs/index.html версии скриптов страницы')
+    p_stamp.set_defaults(func=cmd_stamp)
 
     args = parser.parse_args()
     args.func(args)

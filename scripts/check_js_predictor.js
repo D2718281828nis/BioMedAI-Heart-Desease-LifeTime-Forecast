@@ -42,4 +42,14 @@ const routeOk = routeDiff.P < 1e-6 && routeDiff.group === 0 && routeDiff.time <=
 failed ||= !routeOk;
 console.log(`${routeOk ? 'OK  ' : 'FAIL'} Конвейер: кластеров не совпало ${routeDiff.cluster}, группы max |ΔP| ${routeDiff.P.toExponential(2)}, ` +
   `несовпадений группы ${routeDiff.group}, время группы max |Δ| ${routeDiff.time} дн.`);
+// Версии скриптов в index.html (src="app.js?v=…") совпадают с содержимым файлов — иначе после публикации браузер может
+// взять из кэша старые скрипты к новой странице
+const crypto = require('crypto');
+const html = fs.readFileSync(path.join(docs, 'index.html'), 'utf8');
+const stale = [...html.matchAll(/<script src="([\w.-]+\.js)(?:\?v=(\w+))?"><\/script>/g)]
+  .filter(([, name, v]) => crypto.createHash('sha256').update(fs.readFileSync(path.join(docs, name))).digest('hex').slice(0, 10) !== v)
+  .map(([, name]) => name);
+failed ||= stale.length > 0;
+console.log(`${stale.length ? 'FAIL' : 'OK  '} Версии скриптов в index.html` +
+  (stale.length ? `: устарели ${stale.join(', ')} — запустите python scripts/survival_time_predictor.py stamp` : ''));
 process.exit(failed ? 1 : 0);
