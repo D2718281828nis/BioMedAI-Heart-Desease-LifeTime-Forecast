@@ -31,10 +31,10 @@
     --t1: #eb6834;
     --edit: #1baf7a;
     --focus: #2a78d6;
-    --risk0: #f6936f;
-    --risk1: #e26331;
-    --risk2: #b04518;
-    --risk3: #7d2d09;
+    --risk0: #115caf;
+    --risk1: #78aaec;
+    --risk2: #ea8881;
+    --risk3: #a92227;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -54,10 +54,10 @@
       --t1: #d95926;
       --edit: #199e70;
       --focus: #3987e5;
-      --risk0: #944121;
-      --risk1: #cc5728;
-      --risk2: #f5845a;
-      --risk3: #fec1aa;
+      --risk0: #5994e0;
+      --risk1: #2263b1;
+      --risk2: #ac3031;
+      --risk3: #df6862;
     }
   }
   :root[data-theme="dark"] {
@@ -77,10 +77,10 @@
     --t1: #d95926;
     --edit: #199e70;
     --focus: #3987e5;
-    --risk0: #944121;
-    --risk1: #cc5728;
-    --risk2: #f5845a;
-    --risk3: #fec1aa;
+    --risk0: #5994e0;
+    --risk1: #2263b1;
+    --risk2: #ac3031;
+    --risk3: #df6862;
   }
 
   * { box-sizing: border-box; }
@@ -161,7 +161,8 @@
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
   .dot.t0 { background: var(--t0); }
   .dot.t1 { background: var(--t1); }
-  /* Цвет по группе риска: порядковый ряд одного оттенка (светлее — ниже риск; в тёмной теме наоборот) */
+  /* Цвет по группе риска: расходящаяся шкала синий ↔ красный с границей 10% за 12 месяцев (синий — низкий и умеренный,
+     красный — высокий и очень высокий); крайние группы ярче, средние ближе к фону */
   .dot.risk0 { background: var(--risk0); }
   .dot.risk1 { background: var(--risk1); }
   .dot.risk2 { background: var(--risk2); }
@@ -531,7 +532,7 @@
   </footer>
 </div>
 
-<script src="i18n.js?v=d1c73b24f4"></script>
+<script src="i18n.js?v=61826c7f8d"></script>
 <script src="survival_model.js?v=16f11d2a28"></script>
 <script src="survival_predictor.js?v=57012d43b3"></script>
 <script src="tsne.js?v=2646a80490"></script>
