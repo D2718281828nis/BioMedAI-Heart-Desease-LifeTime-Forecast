@@ -420,18 +420,22 @@
     ctx.closePath();
   }
 
-  // Внезапная смерть от ССЗ или неожиданное выживание — ромб цвета фактического исхода с обводкой цветом текста
+  // Внезапная смерть от ССЗ или неожиданное выживание — ромб цвета фактического исхода (в режиме риска — цвета группы
+  // риска с изменениями) с обводкой цветом текста
   function drawMarked(x, y, r, g) {
     diamond(x, y, r + 2);
     ctx.fillStyle = colors.surface;
     ctx.fill();
     diamond(x, y, r);
-    ctx.fillStyle = colors.t[PATIENTS.target[g]];
+    ctx.fillStyle = state.colorByRisk ? colors.risk[predictor.riskGroup(curRisk[state.model][g])] : colors.t[PATIENTS.target[g]];
     ctx.fill();
     ctx.strokeStyle = colors.ink;
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
+
+  // Относительный радиус точки по группе риска (низкий → очень высокий) в режиме раскраски по риску
+  const RISK_SIZE = [0.85, 1, 1.2, 1.45];
 
   function drawMap() {
     ctx.clearRect(0, 0, screen.w, screen.h);
@@ -442,6 +446,8 @@
     // Заливка точки: исход или группа риска выбранной модели (risk — риск за 12 месяцев)
     const m = state.model;
     const fill = (g, risk) => (state.colorByRisk ? colors.risk[predictor.riskGroup(risk)] : colors.t[PATIENTS.target[g]]);
+    // Размер точки растёт с группой риска: порядок групп виден и без различения цветов
+    const size = (risk) => (state.colorByRisk ? RISK_SIZE[predictor.riskGroup(risk)] : 1);
     // В режиме риска точки высокого риска рисуются поверх низкого
     const order = Array.from({ length: n }, (_, i) => i);
     if (state.colorByRisk) order.sort((a, b) => curRisk[m][rows[a]] - curRisk[m][rows[b]]);
@@ -454,7 +460,7 @@
     for (const i of order) {
       const g = rows[i];
       if (editedSet.has(g) || markedGroup(g)) continue;
-      circle(sx(disp[2 * i]), sy(disp[2 * i + 1]), r);
+      circle(sx(disp[2 * i]), sy(disp[2 * i + 1]), r * size(curRisk[m][g]));
       ctx.fillStyle = fill(g, curRisk[m][g]);
       ctx.fill();
       ctx.stroke();
@@ -466,7 +472,8 @@
     }
 
     // Изменённые пациенты: исходное место (пустой кружок; в режиме риска — цвет риска по значениям датасета) → линия →
-    // новое положение (в режиме риска — цвет риска с изменениями)
+    // новое положение (в режиме риска — цвет и размер риска с изменениями, кольцо и линия нейтральные)
+    const editMark = state.colorByRisk ? colors.muted : colors.edit;
     for (const g of editedSet) {
       const i = ds.local[g];
       if (i < 0) continue;
@@ -475,7 +482,7 @@
       ctx.beginPath();
       ctx.moveTo(x0, y0);
       ctx.lineTo(x1, y1);
-      ctx.strokeStyle = colors.edit;
+      ctx.strokeStyle = editMark;
       ctx.lineWidth = 2;
       ctx.stroke();
       circle(x0, y0, 3.5);
@@ -484,14 +491,15 @@
       ctx.strokeStyle = colors.muted;
       ctx.lineWidth = 1.5;
       ctx.stroke();
-      circle(x1, y1, 6.5);
-      ctx.fillStyle = colors.edit;
+      const inner = 4 * size(curRisk[m][g]);
+      circle(x1, y1, inner + 2.5);
+      ctx.fillStyle = editMark;
       ctx.fill();
       if (markedGroup(g)) {
         drawMarked(x1, y1, 4, g);
         continue;
       }
-      circle(x1, y1, 4);
+      circle(x1, y1, inner);
       ctx.fillStyle = fill(g, curRisk[m][g]);
       ctx.fill();
     }
@@ -1345,6 +1353,7 @@
   function renderRiskLegend() {
     const on = state.colorByRisk, m = state.model, g = state.selected;
     document.querySelectorAll('.outcome-key').forEach((node) => { node.hidden = on; });
+    $('map-legend').classList.toggle('by-risk', on);
     $('risk-keys').hidden = !on;
     if (on) {
       const counts = [0, 0, 0, 0];

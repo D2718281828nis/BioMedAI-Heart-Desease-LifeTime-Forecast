@@ -31,10 +31,10 @@
     --t1: #eb6834;
     --edit: #1baf7a;
     --focus: #2a78d6;
-    --risk0: #115caf;
-    --risk1: #78aaec;
-    --risk2: #ea8881;
-    --risk3: #a92227;
+    --risk0: #5dc656;
+    --risk1: #2579dc;
+    --risk2: #e65815;
+    --risk3: #a91320;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -54,10 +54,10 @@
       --t1: #d95926;
       --edit: #199e70;
       --focus: #3987e5;
-      --risk0: #5994e0;
-      --risk1: #2263b1;
-      --risk2: #ac3031;
-      --risk3: #df6862;
+      --risk0: #349659;
+      --risk1: #3987e5;
+      --risk2: #df591f;
+      --risk3: #b00a1e;
     }
   }
   :root[data-theme="dark"] {
@@ -77,10 +77,10 @@
     --t1: #d95926;
     --edit: #199e70;
     --focus: #3987e5;
-    --risk0: #5994e0;
-    --risk1: #2263b1;
-    --risk2: #ac3031;
-    --risk3: #df6862;
+    --risk0: #349659;
+    --risk1: #3987e5;
+    --risk2: #df591f;
+    --risk3: #b00a1e;
   }
 
   * { box-sizing: border-box; }
@@ -161,12 +161,16 @@
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
   .dot.t0 { background: var(--t0); }
   .dot.t1 { background: var(--t1); }
-  /* Цвет по группе риска: расходящаяся шкала синий ↔ красный с границей 10% за 12 месяцев (синий — низкий и умеренный,
-     красный — высокий и очень высокий); крайние группы ярче, средние ближе к фону */
-  .dot.risk0 { background: var(--risk0); }
+  /* Цвет по группе риска: зелёный — низкий, синий — умеренный, оранжевый — высокий, красный — очень высокий; размер
+     точки растёт с группой (порядок виден и без различения цветов). В этом режиме цвет на карте означает только риск:
+     ромбы окрашены по риску, отметки изменённых пациентов — нейтральные */
+  .dot.risk0 { background: var(--risk0); width: 8px; height: 8px; }
   .dot.risk1 { background: var(--risk1); }
-  .dot.risk2 { background: var(--risk2); }
-  .dot.risk3 { background: var(--risk3); }
+  .dot.risk2 { background: var(--risk2); width: 11px; height: 11px; }
+  .dot.risk3 { background: var(--risk3); width: 13px; height: 13px; }
+  .legend.by-risk .diamond { background: var(--surface); }
+  .legend.by-risk .edit-key b { background: var(--muted); }
+  .legend.by-risk .edit-key em { border-color: var(--muted); }
   .risk-keys { display: contents; }
   .legend [hidden] { display: none; }
   .risk-change { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 8px 0 0; font-size: 13px; color: var(--ink-2); }
@@ -532,10 +536,10 @@
   </footer>
 </div>
 
-<script src="i18n.js?v=61826c7f8d"></script>
+<script src="i18n.js?v=64de372efb"></script>
 <script src="survival_model.js?v=16f11d2a28"></script>
 <script src="survival_predictor.js?v=57012d43b3"></script>
 <script src="tsne.js?v=2646a80490"></script>
-<script src="app.js?v=ad4254787d"></script>
+<script src="app.js?v=2049908b8a"></script>
 </body>
 </html>
