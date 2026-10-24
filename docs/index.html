@@ -31,6 +31,10 @@
     --t1: #eb6834;
     --edit: #1baf7a;
     --focus: #2a78d6;
+    --risk0: #f6936f;
+    --risk1: #e26331;
+    --risk2: #b04518;
+    --risk3: #7d2d09;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -50,6 +54,10 @@
       --t1: #d95926;
       --edit: #199e70;
       --focus: #3987e5;
+      --risk0: #944121;
+      --risk1: #cc5728;
+      --risk2: #f5845a;
+      --risk3: #fec1aa;
     }
   }
   :root[data-theme="dark"] {
@@ -69,6 +77,10 @@
     --t1: #d95926;
     --edit: #199e70;
     --focus: #3987e5;
+    --risk0: #944121;
+    --risk1: #cc5728;
+    --risk2: #f5845a;
+    --risk3: #fec1aa;
   }
 
   * { box-sizing: border-box; }
@@ -149,6 +161,16 @@
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
   .dot.t0 { background: var(--t0); }
   .dot.t1 { background: var(--t1); }
+  /* Цвет по группе риска: порядковый ряд одного оттенка (светлее — ниже риск; в тёмной теме наоборот) */
+  .dot.risk0 { background: var(--risk0); }
+  .dot.risk1 { background: var(--risk1); }
+  .dot.risk2 { background: var(--risk2); }
+  .dot.risk3 { background: var(--risk3); }
+  .risk-keys { display: contents; }
+  .legend [hidden] { display: none; }
+  .risk-change { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 8px 0 0; font-size: 13px; color: var(--ink-2); }
+  .risk-change[hidden] { display: none; }
+  .risk-change b { color: var(--ink); font-weight: 600; }
   .diamond { width: 8px; height: 8px; background: var(--t1); border: 1.5px solid var(--ink); transform: rotate(45deg); display: inline-block; margin: 0 2px; flex: none; }
   .diamond.t0 { background: var(--t0); }
   .diamond.t1 { background: var(--t1); }
@@ -378,8 +400,10 @@
       <div class="card-head">
         <h2 id="map-title" data-i18n="map.title"></h2>
         <div class="legend" id="map-legend">
-          <span class="key"><span class="dot t1"></span><span id="legend-t1"></span></span>
-          <span class="key"><span class="dot t0"></span><span id="legend-t0"></span></span>
+          <label class="key highlight-key"><input type="checkbox" id="color-risk"><span data-i18n="risk.toggle"></span></label>
+          <span class="key outcome-key"><span class="dot t1"></span><span id="legend-t1"></span></span>
+          <span class="key outcome-key"><span class="dot t0"></span><span id="legend-t0"></span></span>
+          <span class="risk-keys" id="risk-keys" hidden></span>
           <span class="key"><span class="ring"></span><span data-i18n="legend.selected"></span></span>
           <span class="key"><span class="edit-key"><i></i><b></b><em></em></span><span data-i18n="legend.edited"></span></span>
           <span class="key marked-key"><span class="diamond t1"></span><span id="legend-sudden"></span></span>
@@ -391,6 +415,7 @@
         <canvas id="map" tabindex="0" role="img" data-i18n-aria-label="map.aria"></canvas>
         <div class="tooltip" id="map-tooltip" role="status"></div>
       </div>
+      <p class="risk-change" id="risk-change" role="status" hidden></p>
       <div class="map-foot">
         <span id="tsne-status" data-i18n="status.initial"></span>
         <span data-i18n="map.hint"></span>

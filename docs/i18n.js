@@ -34,11 +34,16 @@
       'download': 'Download CSV',
 
       'map.title': 't-SNE map of patients',
-      'map.aria': 't-SNE map of the patients of the selected dataset, colored by outcome. Hover a point to see its time; click to select it. The same data is in the table view below.',
+      'map.aria': 't-SNE map of the patients of the selected dataset, colored by outcome or, with "color by risk", by the predicted risk group. Hover a point to see its time; click to select it. The same data is in the table view below.',
       'map.hint': 'Hover a point to see its time · click to select',
       'legend.t0': 'No CVD death (target = 0), n = {n}',
       'legend.t1': 'CVD death (target = 1), n = {n}',
       'legend.selected': 'Selected',
+      'risk.toggle': 'color by risk',
+      'risk.legend': '{model}, risk of CVD death within 12 mo:',
+      'risk.key': '{group}, n = {n}',
+      'risk.change': 'ID {id} with your edits: 12-month risk {from} → {to}, group "{g0}" → "{g1}"',
+      'risk.same': 'ID {id} with your edits: 12-month risk {from} → {to}, group "{g0}" unchanged',
       'sudden.legend': 'Sudden unexplained CVD death, n = {n}',
       'sudden.label': 'Sudden unexplained CVD death',
       'sudden.highlight': 'highlight ◆',
@@ -67,6 +72,7 @@
       'tt.outcome': 'outcome, target = {t}',
       'tt.pred': 'predicted time, {model}',
       'tt.predEdit': 'predicted with your edits',
+      'tt.riskEdit': 'CVD death risk within 1 year, edited',
       'tt.risk1y': 'CVD death risk within 1 year',
 
       'pred.title': 'Predicted time',
@@ -225,7 +231,7 @@
         <li><b>Staged pipeline.</b> Stage 1: CVD death within 10 days (logistic regression on the parameters and the patient's cluster; agglomerative clustering of the whole cohort finds 8 clinical phenotypes, and the card shows the patient's cluster). Stage 2: CVD death before τ or survival beyond τ. A CoxPH model gives the timing of later deaths. S(t) = 1 − P<sub>early</sub>·F<sub>early</sub>(t) − P<sub>late</sub>·F<sub>late</sub>(t | x): the group probabilities weigh the times; the most likely group is shown for reference.</li>
         <li><b>Accuracy.</b> The model table uses the 302 held-out patients (IPCW weights for censoring): C-index, AUC and predicted / observed at the selected time point, and the integrated Brier score. There are only 7 CVD deaths among them within 1 month and 16 within 12 months, so the risk-group table and the confusion matrix use out-of-sample predictions on the 1204 training patients (5-fold cross-validation; 30 and 72 deaths). For the Staged pipeline the out-of-sample AUC is 0.79–0.80; within 12 months 1.5% of the "low" group (43% of patients) and 41% of the "very high" group died, against predicted 1.9% and 35%. The confusion matrix compares the predicted group with a "real" one, based on the share of deaths among the 50 most similar patients: for the Staged pipeline the groups match for 57% of patients and almost all the others differ by one (weighted kappa 0.55). The "real" risk is an estimate too, and a cruder one: it separates deaths within a year with AUC 0.69 against 0.79 for the model, and where the two disagree the outcome sides with the model: 10.2% died within the year where the model rated the risk higher, 2.9% where it rated it lower. A high-risk group can be recognised; the day of death cannot.</li>
         <li><b>Marks on the map.</b> Orange ◆: sudden unexplained CVD death, a death within the first year while the median risk of the eight models by the nearest time point is below twice the cohort average and at least 90% of the 50 most similar patients survived that period (39 of the 88 such deaths). Blue ◆: unexpected survival, no CVD death by τ although the Staged pipeline estimated the risk at 50% or more (2 patients; for ID 67 a hemoglobin of 34 g/L is probably an entry error). Values outside plausible ranges are flagged in the editor and under the prediction.</li>
-        <li><b>t-SNE</b> is computed in the browser on the 30 parameters standardized within the selected dataset (exact method, PCA initialization, 1000 iterations, as in scikit-learn). When you edit a patient, it is placed onto the fixed map by out-of-sample t-SNE: only that point moves, from its dataset position (hollow circle) to the new one. Edits are kept by patient ID across both datasets.</li>
+        <li><b>t-SNE</b> is computed in the browser on the 30 parameters standardized within the selected dataset (exact method, PCA initialization, 1000 iterations, as in scikit-learn). When you edit a patient, it is placed onto the fixed map by out-of-sample t-SNE: only that point moves, from its dataset position (hollow circle) to the new one. Edits are kept by patient ID across both datasets. "Color by risk" colors the points by the risk group of the selected model (12-month prediction): the higher the risk, the stronger the color stands out from the background. For an edited patient the hollow circle at the dataset position has the color of the risk from the dataset values and the new point the color with the edits, so moving a slider shows how the risk changes.</li>
         <li>Details (comparisons of variants, rejected approaches and the former "error ≤ 150 days" criterion) are in the <a href="${README_URL}">README</a>. The same prediction from the command line:</li>`,
       'footer.license': 'MIT license',
       'footer.generated': 'models re-trained {date} by scripts/survival_time_predictor.py',
@@ -251,11 +257,16 @@
       'download': 'Скачать CSV',
 
       'map.title': 'Карта пациентов (t-SNE)',
-      'map.aria': 'Карта t-SNE пациентов выбранного датасета, цвет — исход. Наведите на точку, чтобы увидеть time; щелчок выбирает пациента. Те же данные — в таблице ниже.',
+      'map.aria': 'Карта t-SNE пациентов выбранного датасета, цвет — исход или, с флажком «цвет — риск», прогнозная группа риска. Наведите на точку, чтобы увидеть time; щелчок выбирает пациента. Те же данные — в таблице ниже.',
       'map.hint': 'Наведите на точку — увидите time · щелчок выбирает пациента',
       'legend.t0': 'Нет смерти от ССЗ (target = 0), n = {n}',
       'legend.t1': 'Смерть от ССЗ (target = 1), n = {n}',
       'legend.selected': 'Выбранный пациент',
+      'risk.toggle': 'цвет — риск',
+      'risk.legend': '{model}, риск смерти от ССЗ за 12 мес.:',
+      'risk.key': '{group}, n = {n}',
+      'risk.change': 'ID {id} с изменениями: риск за 12 мес. {from} → {to}, группа «{g0}» → «{g1}»',
+      'risk.same': 'ID {id} с изменениями: риск за 12 мес. {from} → {to}, группа «{g0}» не изменилась',
       'sudden.legend': 'Внезапная необъяснимая смерть от ССЗ, n = {n}',
       'sudden.label': 'Внезапная необъяснимая смерть от ССЗ',
       'sudden.highlight': 'выделить ◆',
@@ -284,6 +295,7 @@
       'tt.outcome': 'исход, target = {t}',
       'tt.pred': 'прогноз времени, {model}',
       'tt.predEdit': 'прогноз с вашими изменениями',
+      'tt.riskEdit': 'риск смерти от ССЗ за 1 год с изменениями',
       'tt.risk1y': 'риск смерти от ССЗ за 1 год',
 
       'pred.title': 'Прогноз времени',
@@ -442,7 +454,7 @@
         <li><b>Многоэтапный конвейер</b> (Staged pipeline). Этап 1 — смерть от ССЗ в первые 10 дней (логистическая регрессия по признакам и кластеру пациента: агломеративная кластеризация всей когорты выделяет 8 клинических фенотипов, кластер показан в карточке). Этап 2 — смерть от ССЗ до τ или жизнь дольше τ. Время поздней смерти даёт модель Кокса. S(t) = 1 − P<sub>ранн</sub>·F<sub>ранн</sub>(t) − P<sub>поздн</sub>·F<sub>поздн</sub>(t | x): вероятности групп взвешивают время, наиболее вероятная группа показана справочно.</li>
         <li><b>Точность.</b> Таблица моделей — 302 отложенных пациента (цензурирование учтено весами IPCW): C-index, AUC и «прогноз / факт» к выбранному сроку, интегральный Brier score. Смертей от ССЗ среди них мало — 7 к 1 месяцу и 16 к 12, поэтому таблица групп риска и матрица ошибок посчитаны по прогнозам вне выборки на 1204 обучающих пациентах (кросс-валидация по 5 фолдам; 30 и 72 смерти). У Staged pipeline AUC вне выборки — 0,79–0,80; за 12 месяцев умерли 1,5% группы «низкий» (43% пациентов) и 41% группы «очень высокий» при прогнозе 1,9% и 35%. Матрица ошибок сравнивает прогнозную группу с «реальной» — по доле умерших среди 50 самых похожих пациентов: у Staged pipeline группы совпадают у 57% пациентов, а почти у всех остальных отличаются на одну (взвешенная каппа 0,55). «Реальный» риск — тоже оценка, причём более грубая: смерти за год он различает с AUC 0,69 против 0,79 у модели, и где они расходятся, факт на стороне модели: если модель оценила риск выше, за год умерли 10,2%, если ниже — 2,9%. Группу высокого риска распознать можно, день смерти — нет.</li>
         <li><b>Отметки на карте.</b> Оранжевый ◆ — внезапная необъяснимая смерть от ССЗ: смерть в первый год, когда медиана риска восьми моделей к ближайшему сроку ниже двух средних по когорте, а не меньше 90% из 50 самых похожих пациентов этот срок пережили (39 из 88 таких смертей). Синий ◆ — неожиданное выживание: смерти от ССЗ до τ нет, хотя Staged pipeline оценил риск в 50% и выше (2 пациента; у ID 67 гемоглобин 34 г/л — вероятно, ошибка ввода). Значения вне правдоподобных диапазонов отмечаются в редакторе и под прогнозом.</li>
-        <li><b>t-SNE</b> считается в браузере по 30 признакам, стандартизованным внутри выбранного датасета (точный метод, инициализация PCA, 1000 итераций — как в scikit-learn). Изменённый пациент помещается на готовую карту методом out-of-sample t-SNE: двигается только его точка — из положения по датасету (пустой кружок) в новое. Изменения привязаны к ID пациента и сохраняются в обоих датасетах.</li>
+        <li><b>t-SNE</b> считается в браузере по 30 признакам, стандартизованным внутри выбранного датасета (точный метод, инициализация PCA, 1000 итераций — как в scikit-learn). Изменённый пациент помещается на готовую карту методом out-of-sample t-SNE: двигается только его точка — из положения по датасету (пустой кружок) в новое. Изменения привязаны к ID пациента и сохраняются в обоих датасетах. Флажок «цвет — риск» раскрашивает точки по группе риска выбранной модели (прогноз на 12 месяцев): чем выше риск, тем контрастнее цвет к фону. У изменённого пациента кружок на месте по датасету окрашен по риску из значений датасета, а новая точка — по риску с изменениями, поэтому при движении ползунка видно, как меняется риск.</li>
         <li>Подробности — сравнение вариантов, отвергнутые подходы и прежний критерий «ошибка ≤ 150 дней» — в <a href="${README_URL}">README</a>. Тот же прогноз из командной строки:</li>`,
       'footer.license': 'лицензия MIT',
       'footer.generated': 'модели переобучены {date} скриптом scripts/survival_time_predictor.py',

@@ -155,6 +155,8 @@
     hovered: -1,
     theme: saved.theme,
     highlightSudden: saved.highlightSudden === true,
+    // Цвет точек карты: исход (по умолчанию) или группа риска выбранной модели по прогнозу на 12 месяцев
+    colorByRisk: saved.colorByRisk === true,
     horizon: Number.isInteger(saved.horizon) && saved.horizon >= 0 && saved.horizon < HORIZONS.length ? saved.horizon : DEFAULT_HORIZON,
     values: PATIENTS.X.map((row) => row.slice()),
   };
@@ -190,7 +192,8 @@
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
           dataset: state.dataset, perplexity: state.perplexity, models: state.models, defaults: DEFAULT_MODELS,
           selectedId: PATIENTS.id[state.selected],
-          theme: state.theme, lang: I18N.lang, highlightSudden: state.highlightSudden, horizon: state.horizon, editsById,
+          theme: state.theme, lang: I18N.lang, highlightSudden: state.highlightSudden, colorByRisk: state.colorByRisk,
+          horizon: state.horizon, editsById,
         }));
       } catch (e) { /* хранилище недоступно — состояние живёт только до перезагрузки */ }
     }, 200);
@@ -369,6 +372,7 @@
   function readColors() {
     colors = {
       t: [cssVar('--t0'), cssVar('--t1')],
+      risk: [0, 1, 2, 3].map((i) => cssVar(`--risk${i}`)),
       edit: cssVar('--edit'),
       surface: cssVar('--surface'),
       ink: cssVar('--ink'),
@@ -435,17 +439,23 @@
     const { rows, n, disp } = ds;
     const Y = ds.tsne.Y;
     const r = n > 800 ? 3 : 4;
+    // Заливка точки: исход или группа риска выбранной модели (risk — риск за 12 месяцев)
+    const m = state.model;
+    const fill = (g, risk) => (state.colorByRisk ? colors.risk[predictor.riskGroup(risk)] : colors.t[PATIENTS.target[g]]);
+    // В режиме риска точки высокого риска рисуются поверх низкого
+    const order = Array.from({ length: n }, (_, i) => i);
+    if (state.colorByRisk) order.sort((a, b) => curRisk[m][rows[a]] - curRisk[m][rows[b]]);
 
     // Пациенты; у каждой точки кольцо цвета фона, чтобы перекрывающиеся точки читались.
     // В режиме выделения внезапных смертей остальные точки приглушены
     ctx.lineWidth = n > 800 ? 1 : 1.5;
     ctx.strokeStyle = colors.surface;
     ctx.globalAlpha = state.highlightSudden ? 0.2 : 1;
-    for (let i = 0; i < n; i++) {
+    for (const i of order) {
       const g = rows[i];
       if (editedSet.has(g) || markedGroup(g)) continue;
       circle(sx(disp[2 * i]), sy(disp[2 * i + 1]), r);
-      ctx.fillStyle = colors.t[PATIENTS.target[g]];
+      ctx.fillStyle = fill(g, curRisk[m][g]);
       ctx.fill();
       ctx.stroke();
     }
@@ -455,7 +465,8 @@
       if (markedGroup(g) && !editedSet.has(g)) drawMarked(sx(disp[2 * i]), sy(disp[2 * i + 1]), state.highlightSudden ? 7 : 5, g);
     }
 
-    // Изменённые пациенты: исходное место (пустой кружок) → линия → новое положение
+    // Изменённые пациенты: исходное место (пустой кружок; в режиме риска — цвет риска по значениям датасета) → линия →
+    // новое положение (в режиме риска — цвет риска с изменениями)
     for (const g of editedSet) {
       const i = ds.local[g];
       if (i < 0) continue;
@@ -468,7 +479,7 @@
       ctx.lineWidth = 2;
       ctx.stroke();
       circle(x0, y0, 3.5);
-      ctx.fillStyle = colors.surface;
+      ctx.fillStyle = state.colorByRisk ? fill(g, baseRisk[m][g]) : colors.surface;
       ctx.fill();
       ctx.strokeStyle = colors.muted;
       ctx.lineWidth = 1.5;
@@ -481,7 +492,7 @@
         continue;
       }
       circle(x1, y1, 4);
-      ctx.fillStyle = colors.t[PATIENTS.target[g]];
+      ctx.fillStyle = fill(g, curRisk[m][g]);
       ctx.fill();
     }
 
@@ -565,7 +576,7 @@
       [daysTime(baseTime[m][g]), t('tt.pred', { model: MODELS[m] })],
       [fmtPct(baseRisk[m][g]), t('tt.risk1y')],
     ];
-    if (editedSet.has(g)) rows.push([daysTime(curTime[m][g]), t('tt.predEdit')]);
+    if (editedSet.has(g)) rows.push([daysTime(curTime[m][g]), t('tt.predEdit')], [fmtPct(curRisk[m][g]), t('tt.riskEdit')]);
     tooltip.replaceChildren(
       el('div', { class: 'tt-title' },
         el('span', { class: `dot t${PATIENTS.target[g]}` }),
@@ -1188,6 +1199,7 @@
     syncEditor();
     renderPatientBar();
     renderPrediction();
+    renderRiskLegend();
     drawMap();
     save();
   }
@@ -1205,6 +1217,7 @@
     syncEditor();
     renderPatientBar();
     renderPrediction();
+    renderRiskLegend();
     updateStatus();
     $('reset-all').disabled = editedSet.size === 0;
     save();
@@ -1234,6 +1247,8 @@
     for (const g of ds.rows) updateTableRow(g);
     sortTable();
     renderPrediction();
+    renderRiskLegend();
+    drawMap();
     save();
   }
 
@@ -1321,7 +1336,32 @@
       option.textContent = t(`dataset.${option.value}`, { n: fmtDays(getView(option.value).n) });
     }
     for (const option of $('horizon-select').options) option.textContent = t(`horizon.${HORIZONS[option.value]}`);
+    renderRiskLegend();
     updateStatus();
+  }
+
+  // Легенда раскраски по риску: группы выбранной модели с числом пациентов датасета (по текущим значениям признаков)
+  // и строка под картой — как изменение признаков выбранного пациента сдвинуло его риск и цвет
+  function renderRiskLegend() {
+    const on = state.colorByRisk, m = state.model, g = state.selected;
+    document.querySelectorAll('.outcome-key').forEach((node) => { node.hidden = on; });
+    $('risk-keys').hidden = !on;
+    if (on) {
+      const counts = [0, 0, 0, 0];
+      for (const p of ds.rows) counts[predictor.riskGroup(curRisk[m][p])]++;
+      $('risk-keys').replaceChildren(el('span', { class: 'key', text: t('risk.legend', { model: MODELS[m] }) }),
+        ...counts.map((n, i) => el('span', { class: 'key' }, el('span', { class: `dot risk${i}` }),
+          el('span', { text: t('risk.key', { group: t(`riskgroup.${i}`), n: fmtDays(n) }) }))));
+    }
+    const change = $('risk-change');
+    change.hidden = !on || g < 0 || !editedSet.has(g);
+    if (change.hidden) return;
+    const g0 = predictor.riskGroup(baseRisk[m][g]), g1 = predictor.riskGroup(curRisk[m][g]);
+    change.replaceChildren(el('span', { class: `dot risk${g0}` }), '→', el('span', { class: `dot risk${g1}` }),
+      el('span', { text: t(g0 === g1 ? 'risk.same' : 'risk.change', {
+        id: PATIENTS.id[g], from: fmtPct(baseRisk[m][g]), to: fmtPct(curRisk[m][g]),
+        g0: t(`riskgroup.${g0}`), g1: t(`riskgroup.${g1}`),
+      }) }));
   }
 
   function setLang(lang) {
@@ -1392,6 +1432,13 @@
     });
 
     $('reset-all').addEventListener('click', resetAll);
+    $('color-risk').checked = state.colorByRisk;
+    $('color-risk').addEventListener('change', (e) => {
+      state.colorByRisk = e.target.checked;
+      renderRiskLegend();
+      drawMap();
+      save();
+    });
     $('highlight-sudden').checked = state.highlightSudden;
     $('highlight-sudden').addEventListener('change', (e) => {
       state.highlightSudden = e.target.checked;
